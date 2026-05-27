@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>claude-sessions</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot"></span>
+      <span>claude-sessions</span>
+    </div>
+    <div class="controls">
+      <input id="search" type="search" placeholder="Search project, branch, or prompt…" />
+      <div class="filters">
+        <button data-state="all" class="active">all <span class="count" id="count-all">0</span></button>
+        <button data-state="waiting_user">waiting <span class="count" id="count-waiting_user">0</span></button>
+        <button data-state="running_tool">running <span class="count" id="count-running_tool">0</span></button>
+        <button data-state="thinking">thinking <span class="count" id="count-thinking">0</span></button>
+        <button data-state="idle">idle <span class="count" id="count-idle">0</span></button>
+      </div>
+      <span id="status" class="status">connecting…</span>
+    </div>
+  </header>
+
+  <main id="grid" class="grid"></main>
+
+  <div id="empty" class="empty hidden">
+    <p>No sessions found.</p>
+    <p class="muted">Start a Claude Code session in any directory and it will show up here.</p>
+  </div>
+
+  <aside id="detail" class="detail hidden">
+    <div class="detail-head">
+      <h2 id="detail-title"></h2>
+      <button id="detail-close" aria-label="close">×</button>
+    </div>
+    <div id="detail-body" class="detail-body"></div>
+  </aside>
+
+  <script src="app.js"></script>
+</body>
+</html>
