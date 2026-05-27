@@ -1,31 +1,27 @@
 // ============================================================
-// claude-sessions v1
-// One list. One drawer. Every action a keystroke away.
+// claude-sessions v2 — sidebar restored, date-grouped, pinning
 // ============================================================
 
-const STORAGE = "cs:v1";
+const STORAGE = "cs:v2";
 
 // ============================================================
 // State
 // ============================================================
-const sessions = new Map();   // id -> session
-let visibleIds = [];          // ordered list IDs currently in DOM
+const sessions = new Map();
+const pinned = new Set();           // session ids pinned by user
+let visibleIds = [];
 let selectedId = null;
-let drawerOpen = false;
-let drawerSplit = false;
+let transcriptExpanded = false;
 let paletteOpen = false;
 let paletteQuery = "";
 let paletteCursor = 0;
-let paletteRows = [];         // current rows in the palette
+let paletteRows = [];
 let helpOpen = false;
-let transcriptExpanded = false;
 
 const filters = {
-  live: true,                 // default: Live ON
-  waiting: false,
-  exited: false,
-  repos: new Set(),           // selected repo names (empty = all)
-  search: "",                 // top-bar search query
+  state: "all",   // "all" | "live" | "waiting"
+  repos: new Set(),
+  search: "",
 };
 
 // ============================================================
@@ -33,26 +29,23 @@ const filters = {
 // ============================================================
 const $ = id => document.getElementById(id);
 
-const listEl       = $("list");
-const emptyEl      = $("empty-state");
-const emptyClearBtn= $("empty-clear");
+const sidebar      = $("sidebar");
+const sbList       = $("sb-list");
+const sbEmpty      = $("sb-empty");
 const searchEl     = $("search");
 const chipsEl      = $("chips");
-const scopePill    = $("scope-pill");
 const scopeCountEl = $("scope-count");
-const helpBtn      = $("help-btn");
+const collapseBtn  = $("collapse-btn");
+const resizeEl     = $("sb-resize");
+const emptyClear   = $("empty-clear");
 
-const drawerEl     = $("drawer");
-const drawerTitle  = $("drawer-title");
-const drawerSub    = $("drawer-sub");
-const drawerBody   = $("drawer-body");
-const drawerClose  = $("drawer-close");
-const drawerExpand = $("drawer-expand");
+const detailEl     = $("detail");
+const emptyMain    = $("empty-main");
 
 const paletteEl    = $("palette");
 const paletteScrim = $("palette-scrim");
 const paletteInput = $("palette-input");
-const paletteResults= $("palette-results");
+const paletteResults = $("palette-results");
 
 const helpEl       = $("help");
 const helpScrim    = $("help-scrim");
@@ -74,13 +67,12 @@ function fmtAge(iso) {
   const ms = Date.now() - new Date(iso).getTime();
   const s = ms / 1000;
   if (s < 5) return "now";
-  if (s < 60)   return `${Math.floor(s)}s`;
-  if (s < 3600) return `${Math.floor(s/60)}m`;
-  if (s < 86400)return `${Math.floor(s/3600)}h`;
+  if (s < 60)    return `${Math.floor(s)}s`;
+  if (s < 3600)  return `${Math.floor(s/60)}m`;
+  if (s < 86400) return `${Math.floor(s/3600)}h`;
   if (s < 86400*7)  return `${Math.floor(s/86400)}d`;
   if (s < 86400*28) return `${Math.floor(s/86400/7)}w`;
-  const d = new Date(iso);
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function fmtBytes(n) {
@@ -90,20 +82,18 @@ function fmtBytes(n) {
   return `${(n/1024/1024).toFixed(1)} MB`;
 }
 
+function topicOf(s) {
+  return (s.firstUserMessage || s.lastUserMessage || "").replace(/\s+/g, " ").trim();
+}
+
+function truncate(s, n) { return s.length <= n ? s : s.slice(0, n - 1) + "…"; }
+
 function rowKind(s) {
   if (!s.live) return "exited";
   return s.state || "idle";
 }
 
-function topicOf(s) {
-  return (s.firstUserMessage || s.lastUserMessage || "").replace(/\s+/g, " ").trim();
-}
-
-function truncate(s, n) {
-  return s.length <= n ? s : s.slice(0, n - 1) + "…";
-}
-
-function matches(s, q) {
+function matchesSearch(s, q) {
   if (!q) return true;
   const lc = q.toLowerCase();
   return (s.project || "").toLowerCase().includes(lc)
@@ -115,40 +105,36 @@ function matches(s, q) {
 }
 
 function passesFilters(s) {
-  const anyStateFilter = filters.live || filters.waiting || filters.exited;
-  if (anyStateFilter) {
-    let pass = false;
-    if (filters.live    && s.live) pass = true;
-    if (filters.waiting && s.live && s.state === "waiting_user") pass = true;
-    if (filters.exited  && !s.live) pass = true;
-    if (!pass) return false;
-  }
+  if (filters.state === "live" && !s.live) return false;
+  if (filters.state === "waiting" && (!s.live || s.state !== "waiting_user")) return false;
   if (filters.repos.size > 0 && !filters.repos.has(s.project || "")) return false;
-  if (!matches(s, filters.search)) return false;
+  if (!matchesSearch(s, filters.search)) return false;
   return true;
 }
 
-function anyFilterActive() {
-  // "Live default" is the baseline; if only Live is true and nothing else, treat as default scope
-  return filters.waiting || filters.exited
-      || filters.repos.size > 0
-      || filters.search.length > 0
-      || !filters.live;   // user turned off Live
+// ChatGPT-style date buckets — Today / Yesterday / Last 7d / Last 30d / Older
+function dateBucket(iso) {
+  if (!iso) return "older";
+  const now = new Date();
+  const d   = new Date(iso);
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startOfYest  = startOfToday - 86400_000;
+  const t = d.getTime();
+  if (t >= startOfToday) return "today";
+  if (t >= startOfYest)  return "yesterday";
+  if (t >= startOfToday - 7  * 86400_000) return "last7";
+  if (t >= startOfToday - 30 * 86400_000) return "last30";
+  return "older";
 }
 
-function clearAllFilters() {
-  filters.live = true;
-  filters.waiting = false;
-  filters.exited = false;
-  filters.repos.clear();
-  filters.search = "";
-  searchEl.value = "";
-  persist();
-  renderChips();
-  renderRepoMenu();
-  renderList();
-  updateScopePill();
-}
+const BUCKET_LABEL = {
+  today:     "Today",
+  yesterday: "Yesterday",
+  last7:     "Previous 7 days",
+  last30:    "Previous 30 days",
+  older:     "Older",
+};
+const BUCKET_ORDER = ["today", "yesterday", "last7", "last30", "older"];
 
 // ============================================================
 // Persistence
@@ -156,10 +142,11 @@ function clearAllFilters() {
 function persist() {
   try {
     localStorage.setItem(STORAGE, JSON.stringify({
-      live: filters.live,
-      waiting: filters.waiting,
-      exited: filters.exited,
+      state: filters.state,
       repos: [...filters.repos],
+      pinned: [...pinned],
+      sidebarW: parseInt(getComputedStyle(document.body).getPropertyValue("--sidebar-w")) || 280,
+      collapsed: document.body.classList.contains("sidebar-collapsed"),
     }));
   } catch {}
 }
@@ -168,130 +155,147 @@ function restore() {
     const raw = localStorage.getItem(STORAGE);
     if (!raw) return;
     const j = JSON.parse(raw);
-    filters.live    = !!j.live;
-    filters.waiting = !!j.waiting;
-    filters.exited  = !!j.exited;
-    filters.repos   = new Set(j.repos || []);
+    if (typeof j.state === "string") filters.state = j.state;
+    filters.repos = new Set(j.repos || []);
+    for (const id of (j.pinned || [])) pinned.add(id);
+    if (j.sidebarW && j.sidebarW > 160 && j.sidebarW < 600) {
+      document.body.style.setProperty("--sidebar-w", `${j.sidebarW}px`);
+    }
+    if (j.collapsed) document.body.classList.add("sidebar-collapsed");
   } catch {}
 }
 
 // ============================================================
-// Render: list
+// Sidebar render
 // ============================================================
-function renderList() {
+function renderSidebar() {
   const all = [...sessions.values()].filter(passesFilters);
   all.sort((a, b) => new Date(b.lastActivity) - new Date(a.lastActivity));
 
-  visibleIds = all.map(s => s.id);
-  listEl.innerHTML = all.map(rowHTML).join("");
+  // Partition: pinned section + date buckets
+  const pinnedRows = [];
+  const buckets = {};
+  for (const k of BUCKET_ORDER) buckets[k] = [];
 
-  if (all.length === 0) {
-    emptyEl.classList.remove("hidden");
-    listEl.classList.add("hidden");
-  } else {
-    emptyEl.classList.add("hidden");
-    listEl.classList.remove("hidden");
+  for (const s of all) {
+    if (pinned.has(s.id)) {
+      pinnedRows.push(s);
+    } else {
+      buckets[dateBucket(s.lastActivity)].push(s);
+    }
   }
 
-  // restore selection visual
+  visibleIds = [
+    ...pinnedRows.map(s => s.id),
+    ...BUCKET_ORDER.flatMap(k => buckets[k].map(s => s.id)),
+  ];
+
+  if (visibleIds.length === 0) {
+    sbList.innerHTML = "";
+    sbEmpty.classList.remove("hidden");
+    updateCounts();
+    return;
+  }
+  sbEmpty.classList.add("hidden");
+
+  const parts = [];
+  if (pinnedRows.length > 0) parts.push(sectionHTML("Pinned", pinnedRows, true));
+  for (const k of BUCKET_ORDER) {
+    if (buckets[k].length > 0) parts.push(sectionHTML(BUCKET_LABEL[k], buckets[k], false));
+  }
+  sbList.innerHTML = parts.join("");
+
+  // Re-select
   if (selectedId) {
-    const r = listEl.querySelector(`[data-id="${CSS.escape(selectedId)}"]`);
-    if (r) r.setAttribute("aria-selected", "true");
+    const row = sbList.querySelector(`[data-id="${CSS.escape(selectedId)}"]`);
+    if (row) row.setAttribute("aria-selected", "true");
   }
 
   updateCounts();
 }
 
+function sectionHTML(label, items, isPinned) {
+  return `
+    <div class="sb-section${isPinned ? " pinned" : ""}">
+      <div class="sb-section-head">
+        <span>${esc(label)}</span>
+        <span class="sb-section-count">${items.length}</span>
+      </div>
+      ${items.map(rowHTML).join("")}
+    </div>
+  `;
+}
+
+const PIN_ICON_FILLED = '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M16 4l4 4-5 1-3 3-1 5-4-4-5 1 1-5-4-4 5-1 4-4z"/></svg>';
+const PIN_ICON_OUTLINE = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M12 17v5M9 10.76V6h-.5a1 1 0 0 1 0-2H15.5a1 1 0 0 1 0 2H15v4.76l3 4.24v2H6v-2z"/></svg>';
+
 function rowHTML(s) {
   const kind = rowKind(s);
   const topic = topicOf(s);
+  const isPinned = pinned.has(s.id);
+
   const topicHTML = topic
-    ? `<span class="topic">${esc(truncate(topic, 80))}</span>`
-    : `<span class="topic placeholder">(no prompts yet)</span>`;
+    ? `<span class="sb-topic">${esc(truncate(topic, 70))}</span>`
+    : `<span class="sb-topic placeholder">(no prompts yet)</span>`;
 
   const branch = s.gitBranch && s.gitBranch !== "HEAD" ? s.gitBranch : "";
-  const metaParts = [];
-  if (s.project) metaParts.push(esc(s.project));
-  if (branch)    metaParts.push(esc(truncate(branch, 36)));
-  const meta = metaParts.length
-    ? metaParts.join(`<span class="sep">/</span>`)
-    : esc(s.cwd || "");
+  const tooltip = [topic, branch ? `${s.project} / ${branch}` : (s.project || ""), s.cwd || ""].filter(Boolean).join("\n");
 
   return `
-    <li class="row ${kind}" role="option" data-id="${esc(s.id)}" tabindex="-1" title="${esc(s.cwd || "")}\n${esc(topic)}">
-      <span class="dot"></span>
+    <div class="sb-row ${kind}${isPinned ? " pinned" : ""}" role="option" data-id="${esc(s.id)}" tabindex="-1" title="${esc(tooltip)}">
+      <span class="sb-dot"></span>
       ${topicHTML}
-      <span class="meta">${meta}</span>
-      <span class="age">${fmtAge(s.lastActivity)}</span>
-    </li>
+      <button class="sb-pin-btn" data-pin="${esc(s.id)}" title="${isPinned ? "Unpin" : "Pin"}" aria-label="${isPinned ? "Unpin" : "Pin"}">${isPinned ? PIN_ICON_FILLED : PIN_ICON_OUTLINE}</button>
+      <span class="sb-age">${fmtAge(s.lastActivity)}</span>
+    </div>
   `;
 }
 
 function patchRow(s) {
-  const row = listEl.querySelector(`[data-id="${CSS.escape(s.id)}"]`);
+  const row = sbList.querySelector(`[data-id="${CSS.escape(s.id)}"]`);
   if (!row) return false;
-
-  const kinds = ["running","thinking","waiting","idle","exited"];
-  row.classList.remove(...kinds);
+  row.classList.remove("running","thinking","waiting","idle","exited");
   row.classList.add(rowKind(s));
 
-  const topicEl = row.querySelector(".topic");
+  const topicEl = row.querySelector(".sb-topic");
   const topic = topicOf(s);
   if (topicEl) {
-    if (topic) {
-      topicEl.classList.remove("placeholder");
-      topicEl.textContent = truncate(topic, 80);
-    } else {
-      topicEl.classList.add("placeholder");
-      topicEl.textContent = "(no prompts yet)";
-    }
+    if (topic) { topicEl.classList.remove("placeholder"); topicEl.textContent = truncate(topic, 70); }
+    else       { topicEl.classList.add("placeholder");    topicEl.textContent = "(no prompts yet)"; }
   }
-  const ageEl = row.querySelector(".age");
+  const ageEl = row.querySelector(".sb-age");
   if (ageEl) ageEl.textContent = fmtAge(s.lastActivity);
   return true;
 }
 
-// ============================================================
-// Render: chips + scope pill + repo menu
-// ============================================================
-function renderChips() {
-  for (const btn of chipsEl.querySelectorAll(".chip[data-chip]")) {
-    const k = btn.dataset.chip;
-    btn.setAttribute("aria-pressed", String(!!filters[k]));
-  }
-  if (filters.repos.size > 0) {
-    repoWrap.dataset.active = "true";
-    repoLabel.textContent = filters.repos.size === 1 ? [...filters.repos][0] : `${filters.repos.size}`;
-  } else {
-    repoWrap.dataset.active = "false";
-    repoLabel.textContent = "All";
-  }
-}
-
 function updateCounts() {
-  const counts = { live: 0, waiting: 0, exited: 0 };
+  const counts = { all: 0, live: 0, waiting: 0 };
   for (const s of sessions.values()) {
+    counts.all++;
     if (s.live) {
       counts.live++;
       if (s.state === "waiting_user") counts.waiting++;
-    } else {
-      counts.exited++;
     }
   }
   for (const el of chipsEl.querySelectorAll(".chip-count")) {
     const k = el.dataset.count;
-    el.textContent = counts[k];
+    if (k in counts) el.textContent = counts[k];
   }
   scopeCountEl.textContent = counts.live;
 }
 
-function updateScopePill() {
-  if (anyFilterActive()) {
-    scopePill.classList.add("actionable");
-    scopePill.title = "Clear all filters";
+function renderChips() {
+  for (const btn of chipsEl.querySelectorAll(".chip[data-chip]")) {
+    const k = btn.dataset.chip;
+    btn.classList.toggle("active", filters.state === k);
+    btn.setAttribute("aria-pressed", String(filters.state === k));
+  }
+  if (filters.repos.size > 0) {
+    repoWrap.dataset.active = "true";
+    repoLabel.textContent = filters.repos.size === 1 ? truncate([...filters.repos][0], 12) : `${filters.repos.size}`;
   } else {
-    scopePill.classList.remove("actionable");
-    scopePill.title = "";
+    repoWrap.dataset.active = "false";
+    repoLabel.textContent = "Repo";
   }
 }
 
@@ -302,11 +306,8 @@ function renderRepoMenu() {
     byRepo.set(k, (byRepo.get(k) || 0) + 1);
   }
   const sorted = [...byRepo.entries()].sort((a,b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-
   const html = [];
-  if (filters.repos.size > 0) {
-    html.push(`<div class="repo-opt-clear" data-action="clear">Clear repo filter</div>`);
-  }
+  if (filters.repos.size > 0) html.push(`<div class="repo-opt-clear" data-action="clear">Clear repo filter</div>`);
   for (const [repo, n] of sorted) {
     const checked = filters.repos.has(repo);
     html.push(`
@@ -318,69 +319,43 @@ function renderRepoMenu() {
     `);
   }
   repoMenu.innerHTML = html.join("");
-
   for (const cb of repoMenu.querySelectorAll("input[data-repo]")) {
     cb.addEventListener("change", e => {
       const r = e.target.dataset.repo;
-      if (e.target.checked) filters.repos.add(r);
-      else filters.repos.delete(r);
-      persist();
-      renderChips();
-      renderList();
-      updateScopePill();
+      if (e.target.checked) filters.repos.add(r); else filters.repos.delete(r);
+      persist(); renderChips(); renderSidebar();
     });
   }
   const clear = repoMenu.querySelector('[data-action="clear"]');
   if (clear) clear.addEventListener("click", () => {
-    filters.repos.clear();
-    persist();
-    renderChips();
-    renderRepoMenu();
-    renderList();
-    updateScopePill();
+    filters.repos.clear(); persist(); renderChips(); renderRepoMenu(); renderSidebar();
   });
 }
 
 // ============================================================
-// Selection + drawer
+// Detail
 // ============================================================
 function selectAndOpen(id) {
   selectedId = id;
-  for (const r of listEl.querySelectorAll(".row")) {
-    r.setAttribute("aria-selected", r.dataset.id === id ? "true" : "false");
+  for (const row of sbList.querySelectorAll(".sb-row")) {
+    row.setAttribute("aria-selected", row.dataset.id === id ? "true" : "false");
   }
-  openDrawer();
-  renderDrawer();
+  renderDetail();
 }
 
 function moveSelection(delta) {
   if (visibleIds.length === 0) return;
   let idx = selectedId ? visibleIds.indexOf(selectedId) : -1;
-  if (idx < 0) idx = -1;
   idx = Math.max(0, Math.min(visibleIds.length - 1, idx + delta));
+  if (idx < 0) idx = 0;
   const id = visibleIds[idx];
   selectedId = id;
-  for (const r of listEl.querySelectorAll(".row")) {
-    r.setAttribute("aria-selected", r.dataset.id === id ? "true" : "false");
+  for (const row of sbList.querySelectorAll(".sb-row")) {
+    row.setAttribute("aria-selected", row.dataset.id === id ? "true" : "false");
   }
-  const row = listEl.querySelector(`[data-id="${CSS.escape(id)}"]`);
+  const row = sbList.querySelector(`[data-id="${CSS.escape(id)}"]`);
   if (row) row.scrollIntoView({ block: "nearest" });
-  if (drawerOpen) renderDrawer();
-}
-
-function openDrawer() {
-  drawerOpen = true;
-  drawerEl.classList.remove("hidden");
-}
-
-function closeDrawer() {
-  drawerOpen = false;
-  drawerEl.classList.add("hidden");
-}
-
-function toggleDrawerSplit() {
-  drawerSplit = !drawerSplit;
-  drawerEl.classList.toggle("split", drawerSplit);
+  renderDetail();
 }
 
 function stateChipHTML(s) {
@@ -394,19 +369,29 @@ function stateChipHTML(s) {
   return `<span class="state-chip ${item.c}"><span class="state-chip-dot"></span>${item.l}</span>`;
 }
 
-function renderDrawer() {
+function renderDetail() {
   const s = sessions.get(selectedId);
-  if (!s) return;
+  if (!s) {
+    detailEl.classList.add("hidden");
+    emptyMain.classList.remove("hidden");
+    return;
+  }
+  emptyMain.classList.add("hidden");
+  detailEl.classList.remove("hidden");
 
-  drawerTitle.textContent = s.project || "(no project)";
   const branch = s.gitBranch && s.gitBranch !== "HEAD" ? s.gitBranch : "—";
-  drawerSub.innerHTML = `${esc(branch)} <span style="color:var(--text-mute)">·</span> ${esc(s.cwd || "")}`;
-
   const topic = topicOf(s);
-  drawerBody.innerHTML = `
-    <div class="section">
-      <h3>State</h3>
-      ${stateChipHTML(s)}
+  const isPinned = pinned.has(s.id);
+
+  detailEl.innerHTML = `
+    <div class="detail-head">
+      <div class="detail-title-row">
+        <span class="detail-project">${esc(s.project || "(no project)")}</span>
+        <span class="detail-branch">${esc(branch)}</span>
+        ${stateChipHTML(s)}
+        <button class="btn-tonal" id="pin-toggle" style="margin-left:auto">${isPinned ? "Unpin" : "Pin"}</button>
+      </div>
+      <div class="detail-cwd">${esc(s.cwd || "")}</div>
     </div>
 
     <div class="section">
@@ -421,21 +406,14 @@ function renderDrawer() {
     </div>
 
     <div class="section">
-      <h3>Resume</h3>
-      <div class="resume">
-        <code id="resume-code">claude --resume ${esc(s.id)}</code>
-        <button class="btn-tonal" id="copy-resume">Copy</button>
-      </div>
-    </div>
-
-    <div class="section">
       <h3>Metadata</h3>
       <dl class="kv-list">
-        <div class="kv"><dt>Session ID</dt><dd>${esc(s.id)}</dd></div>
-        <div class="kv"><dt>Last tool</dt><dd>${esc(s.lastToolName || "—")}</dd></div>
-        <div class="kv"><dt>Permission</dt><dd>${esc(s.permissionMode || "—")}</dd></div>
-        <div class="kv"><dt>Version</dt><dd>${esc(s.version || "—")}</dd></div>
-        <div class="kv"><dt>JSONL size</dt><dd>${fmtBytes(s.sizeBytes)}</dd></div>
+        <div class="kv"><dt>Session ID</dt><dd>${esc(s.id)}</dd><dd></dd></div>
+        <div class="kv"><dt>Last tool</dt><dd>${esc(s.lastToolName || "—")}</dd><dd></dd></div>
+        <div class="kv"><dt>Permission</dt><dd>${esc(s.permissionMode || "—")}</dd><dd></dd></div>
+        <div class="kv"><dt>Claude version</dt><dd>${esc(s.version || "—")}</dd><dd></dd></div>
+        <div class="kv"><dt>JSONL size</dt><dd>${fmtBytes(s.sizeBytes)}</dd><dd></dd></div>
+        <div class="kv"><dt>Resume</dt><dd><code style="background:var(--surface-hi);padding:2px 6px;border-radius:4px;font-size:11px;">claude --resume ${esc(s.id)}</code></dd><dd><button class="btn-tonal" id="copy-resume">Copy</button></dd></div>
       </dl>
     </div>
 
@@ -457,16 +435,18 @@ function renderDrawer() {
     b.textContent = "Copied";
     setTimeout(() => { b.textContent = "Copy"; }, 1200);
   });
-  $("seg-recent").addEventListener("click", () => { transcriptExpanded = false; renderDrawer(); });
-  $("seg-all").addEventListener("click",    () => { transcriptExpanded = true;  renderDrawer(); });
+
+  $("pin-toggle").addEventListener("click", () => togglePin(s.id));
+  $("seg-recent").addEventListener("click", () => { transcriptExpanded = false; renderDetail(); });
+  $("seg-all").addEventListener("click",    () => { transcriptExpanded = true;  renderDetail(); });
 
   loadTranscript(s.id);
 }
 
 async function loadTranscript(id) {
   try {
-    const res = await fetch(`/api/sessions/${encodeURIComponent(id)}/transcript`);
-    const turns = await res.json();
+    const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/transcript`);
+    const turns = await r.json();
     if (id !== selectedId) return;
     const el = $("transcript");
     if (!turns || turns.length === 0) {
@@ -488,7 +468,18 @@ async function loadTranscript(id) {
 }
 
 // ============================================================
-// Cmd+K command palette
+// Pinning
+// ============================================================
+function togglePin(id) {
+  if (pinned.has(id)) pinned.delete(id);
+  else pinned.add(id);
+  persist();
+  renderSidebar();
+  if (selectedId === id) renderDetail();
+}
+
+// ============================================================
+// Command palette
 // ============================================================
 function openPalette() {
   paletteOpen = true;
@@ -500,7 +491,6 @@ function openPalette() {
   renderPalette();
   paletteInput.focus();
 }
-
 function closePalette() {
   paletteOpen = false;
   paletteEl.classList.add("hidden");
@@ -508,7 +498,6 @@ function closePalette() {
 }
 
 function parsePaletteQuery(q) {
-  // Extract is:foo / repo:foo tokens; remaining text is fuzzy
   const tokens = q.trim().split(/\s+/);
   const out = { isLive: null, isWaiting: null, isExited: null, repo: null, words: [] };
   for (const t of tokens) {
@@ -520,11 +509,8 @@ function parsePaletteQuery(q) {
       if (v === "live") out.isLive = true;
       if (v === "waiting") { out.isLive = true; out.isWaiting = true; }
       if (v === "exited") out.isExited = true;
-    } else if (k === "repo") {
-      out.repo = v;
-    } else {
-      out.words.push(t.toLowerCase());
-    }
+    } else if (k === "repo") out.repo = v;
+    else out.words.push(t.toLowerCase());
   }
   return out;
 }
@@ -534,17 +520,9 @@ function paletteScore(s, parsed) {
   if (parsed.isWaiting && s.state !== "waiting_user") return -1;
   if (parsed.isExited  && s.live) return -1;
   if (parsed.repo      && !(s.project || "").toLowerCase().includes(parsed.repo)) return -1;
-
   if (parsed.words.length === 0) return 1;
   let score = 0;
-  const hay = [
-    s.project || "",
-    s.gitBranch || "",
-    s.cwd || "",
-    s.firstUserMessage || "",
-    s.lastUserMessage || "",
-    s.lastAssistantText || "",
-  ].join(" ").toLowerCase();
+  const hay = [s.project, s.gitBranch, s.cwd, s.firstUserMessage, s.lastUserMessage, s.lastAssistantText].filter(Boolean).join(" ").toLowerCase();
   for (const w of parsed.words) {
     if (!hay.includes(w)) return -1;
     score += w.length;
@@ -566,11 +544,10 @@ function renderPalette() {
   paletteRows = top.map(s => ({ type: "session", id: s.id, s }));
 
   if (!paletteQuery.trim()) {
-    // Suggested actions when empty query
-    paletteRows.push({ type: "action", id: "act-toggle-exited", label: "Toggle Exited filter", hint: "is:exited" });
-    paletteRows.push({ type: "action", id: "act-toggle-live",   label: filters.live ? "Hide live sessions" : "Show live sessions", hint: "is:live" });
-    paletteRows.push({ type: "action", id: "act-clear",         label: "Clear all filters", hint: "" });
-    paletteRows.push({ type: "action", id: "act-help",          label: "Show keyboard shortcuts", hint: "?" });
+    paletteRows.push({ type: "action", id: "act-pin",    label: selectedId && pinned.has(selectedId) ? "Unpin selected" : "Pin selected", hint: "p" });
+    paletteRows.push({ type: "action", id: "act-toggle-live",   label: filters.state === "live" ? "Show all" : "Show live only", hint: "is:live" });
+    paletteRows.push({ type: "action", id: "act-clear",  label: "Clear filters", hint: "" });
+    paletteRows.push({ type: "action", id: "act-help",   label: "Show keyboard shortcuts", hint: "?" });
   }
 
   if (paletteRows.length === 0) {
@@ -579,7 +556,6 @@ function renderPalette() {
   }
 
   paletteCursor = Math.min(paletteCursor, paletteRows.length - 1);
-
   let html = "";
   let lastType = null;
   paletteRows.forEach((row, i) => {
@@ -594,7 +570,7 @@ function renderPalette() {
       const meta = [s.project, s.gitBranch && s.gitBranch !== "HEAD" ? s.gitBranch : ""].filter(Boolean).join(" / ");
       html += `
         <div class="palette-row ${kind} ${i === paletteCursor ? "active" : ""}" data-idx="${i}">
-          <span class="dot"></span>
+          <span class="palette-dot"></span>
           <span class="palette-title">${esc(truncate(topic, 60))}</span>
           <span class="palette-sub">${esc(meta)}</span>
           <span class="palette-kbd">${fmtAge(s.lastActivity)}</span>
@@ -614,12 +590,9 @@ function renderPalette() {
   paletteResults.innerHTML = html;
 
   for (const r of paletteResults.querySelectorAll(".palette-row")) {
-    r.addEventListener("click", () => {
-      paletteCursor = parseInt(r.dataset.idx, 10);
-      paletteExecute();
-    });
+    r.addEventListener("click", () => { paletteCursor = +r.dataset.idx; paletteExecute(); });
     r.addEventListener("mouseenter", () => {
-      paletteCursor = parseInt(r.dataset.idx, 10);
+      paletteCursor = +r.dataset.idx;
       for (const x of paletteResults.querySelectorAll(".palette-row")) x.classList.remove("active");
       r.classList.add("active");
     });
@@ -638,37 +611,51 @@ function paletteMove(delta) {
 function paletteExecute() {
   const row = paletteRows[paletteCursor];
   if (!row) return;
-  if (row.type === "session") {
-    closePalette();
-    selectAndOpen(row.id);
-  } else if (row.type === "action") {
-    switch (row.id) {
-      case "act-toggle-exited":
-        filters.exited = !filters.exited; persist(); renderChips(); renderList(); updateScopePill(); break;
-      case "act-toggle-live":
-        filters.live = !filters.live; persist(); renderChips(); renderList(); updateScopePill(); break;
-      case "act-clear":
-        clearAllFilters(); break;
-      case "act-help":
-        closePalette(); openHelp(); return;
-    }
-    closePalette();
+  if (row.type === "session") { closePalette(); selectAndOpen(row.id); return; }
+  switch (row.id) {
+    case "act-pin": if (selectedId) togglePin(selectedId); break;
+    case "act-toggle-live":
+      filters.state = filters.state === "live" ? "all" : "live";
+      persist(); renderChips(); renderSidebar(); break;
+    case "act-clear":
+      filters.state = "all"; filters.repos.clear(); filters.search = ""; searchEl.value = "";
+      persist(); renderChips(); renderRepoMenu(); renderSidebar(); break;
+    case "act-help": closePalette(); openHelp(); return;
   }
+  closePalette();
 }
 
 // ============================================================
 // Help
 // ============================================================
-function openHelp() {
-  helpOpen = true;
-  helpEl.classList.remove("hidden");
-  helpScrim.classList.remove("hidden");
+function openHelp()  { helpOpen = true;  helpEl.classList.remove("hidden"); helpScrim.classList.remove("hidden"); }
+function closeHelp() { helpOpen = false; helpEl.classList.add("hidden");    helpScrim.classList.add("hidden"); }
+
+// ============================================================
+// Sidebar collapse + resize
+// ============================================================
+function toggleSidebar() {
+  document.body.classList.toggle("sidebar-collapsed");
+  persist();
 }
-function closeHelp() {
-  helpOpen = false;
-  helpEl.classList.add("hidden");
-  helpScrim.classList.add("hidden");
-}
+
+let resizing = false;
+resizeEl.addEventListener("mousedown", e => {
+  resizing = true;
+  document.body.classList.add("resizing");
+  e.preventDefault();
+});
+document.addEventListener("mousemove", e => {
+  if (!resizing) return;
+  const w = Math.max(200, Math.min(540, e.clientX));
+  document.body.style.setProperty("--sidebar-w", `${w}px`);
+});
+document.addEventListener("mouseup", () => {
+  if (!resizing) return;
+  resizing = false;
+  document.body.classList.remove("resizing");
+  persist();
+});
 
 // ============================================================
 // Event wiring
@@ -677,11 +664,8 @@ chipsEl.addEventListener("click", e => {
   const btn = e.target.closest(".chip[data-chip]");
   if (!btn) return;
   const k = btn.dataset.chip;
-  filters[k] = !filters[k];
-  persist();
-  renderChips();
-  renderList();
-  updateScopePill();
+  filters.state = (filters.state === k && k !== "all") ? "all" : k;
+  persist(); renderChips(); renderSidebar();
 });
 
 repoBtn.addEventListener("click", e => {
@@ -696,81 +680,65 @@ document.addEventListener("click", e => {
   }
 });
 
-scopePill.addEventListener("click", () => {
-  if (anyFilterActive()) clearAllFilters();
-});
-
 searchEl.addEventListener("input", e => {
   filters.search = e.target.value.trim();
-  renderList();
-  updateScopePill();
+  renderSidebar();
 });
 
-listEl.addEventListener("click", e => {
-  const row = e.target.closest(".row");
-  if (!row) return;
-  selectAndOpen(row.dataset.id);
+sbList.addEventListener("click", e => {
+  const pinBtn = e.target.closest(".sb-pin-btn");
+  if (pinBtn) { e.stopPropagation(); togglePin(pinBtn.dataset.pin); return; }
+  const row = e.target.closest(".sb-row");
+  if (row) selectAndOpen(row.dataset.id);
 });
 
-drawerClose.addEventListener("click", closeDrawer);
-drawerExpand.addEventListener("click", toggleDrawerSplit);
-
-helpBtn.addEventListener("click", openHelp);
-helpScrim.addEventListener("click", closeHelp);
-paletteScrim.addEventListener("click", closePalette);
+collapseBtn.addEventListener("click", toggleSidebar);
+emptyClear.addEventListener("click", () => {
+  filters.state = "all"; filters.repos.clear(); filters.search = ""; searchEl.value = "";
+  persist(); renderChips(); renderRepoMenu(); renderSidebar();
+});
 
 paletteInput.addEventListener("input", e => {
   paletteQuery = e.target.value;
   paletteCursor = 0;
   renderPalette();
 });
-
-emptyClearBtn.addEventListener("click", clearAllFilters);
+paletteScrim.addEventListener("click", closePalette);
+helpScrim.addEventListener("click", closeHelp);
 
 // Global keyboard
 document.addEventListener("keydown", e => {
   const inField = e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA";
 
-  // Palette is open
   if (paletteOpen) {
-    if (e.key === "Escape") { e.preventDefault(); closePalette(); return; }
+    if (e.key === "Escape")    { e.preventDefault(); closePalette(); return; }
     if (e.key === "ArrowDown") { e.preventDefault(); paletteMove(1); return; }
     if (e.key === "ArrowUp")   { e.preventDefault(); paletteMove(-1); return; }
     if (e.key === "Enter")     { e.preventDefault(); paletteExecute(); return; }
     return;
   }
-
-  // Help is open
   if (helpOpen) {
-    if (e.key === "Escape") { closeHelp(); return; }
+    if (e.key === "Escape") closeHelp();
     return;
   }
 
-  // Cmd+K / Ctrl+K opens palette from anywhere
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
-    e.preventDefault();
-    openPalette();
+  // Global shortcuts
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") { e.preventDefault(); openPalette(); return; }
+  if ((e.metaKey || e.ctrlKey) && e.key === "\\")              { e.preventDefault(); toggleSidebar(); return; }
+
+  if (inField) {
+    if (e.key === "Escape" && e.target === searchEl) {
+      searchEl.value = ""; filters.search = ""; renderSidebar(); searchEl.blur();
+    }
     return;
   }
 
-  if (inField) return;   // remaining shortcuts ignored while typing
-
-  if (e.key === "/") {
-    e.preventDefault();
-    searchEl.focus();
-    return;
-  }
-  if (e.key === "?") {
-    e.preventDefault();
-    openHelp();
-    return;
-  }
-  if (e.key === "Escape") {
-    if (drawerOpen) { closeDrawer(); return; }
-  }
-  if (e.key === "ArrowDown" || e.key === "j") { e.preventDefault(); moveSelection(1); return; }
+  if (e.key === "/") { e.preventDefault(); searchEl.focus(); return; }
+  if (e.key === "?") { e.preventDefault(); openHelp(); return; }
+  if (e.key === "ArrowDown" || e.key === "j") { e.preventDefault(); moveSelection(1);  return; }
   if (e.key === "ArrowUp"   || e.key === "k") { e.preventDefault(); moveSelection(-1); return; }
   if (e.key === "Enter" && selectedId) { e.preventDefault(); selectAndOpen(selectedId); return; }
+  if (e.key.toLowerCase() === "p" && selectedId) { e.preventDefault(); togglePin(selectedId); return; }
   if (e.key.toLowerCase() === "c" && selectedId) {
     e.preventDefault();
     navigator.clipboard.writeText(`claude --resume ${selectedId}`);
@@ -779,26 +747,23 @@ document.addEventListener("keydown", e => {
 });
 
 // ============================================================
-// SSE — incoming updates
+// SSE
 // ============================================================
 function onUpsert(s) {
   const existing = sessions.get(s.id);
   sessions.set(s.id, s);
-  // Decide whether the structural set changed enough to re-render the list
-  if (!existing) {
-    renderList();
-    renderRepoMenu();
-    return;
-  }
-  // Liveness or state change can shift filtering
-  if (existing.live !== s.live || existing.state !== s.state || existing.project !== s.project) {
-    renderList();
+  if (!existing
+      || existing.live !== s.live
+      || existing.state !== s.state
+      || existing.project !== s.project
+      || dateBucket(existing.lastActivity) !== dateBucket(s.lastActivity)) {
+    renderSidebar();
     renderRepoMenu();
   } else {
     patchRow(s);
+    updateCounts();
   }
-  if (selectedId === s.id && drawerOpen) renderDrawer();
-  updateCounts();
+  if (selectedId === s.id) renderDetail();
 }
 
 function connect() {
@@ -807,30 +772,27 @@ function connect() {
   es.addEventListener("delete", e => {
     const { id } = JSON.parse(e.data);
     sessions.delete(id);
-    if (selectedId === id) { selectedId = null; closeDrawer(); }
-    renderList();
+    if (pinned.has(id)) { pinned.delete(id); persist(); }
+    if (selectedId === id) { selectedId = null; renderDetail(); }
+    renderSidebar();
     renderRepoMenu();
   });
   es.addEventListener("snapshot-done", () => {
-    renderList();
+    renderSidebar();
     renderRepoMenu();
-    updateScopePill();
   });
-  es.onerror = () => {
-    // EventSource auto-reconnects; nothing to do
-  };
 }
 
-// Refresh age labels every 30s without re-sorting
+// Refresh "ago" labels every 30s without re-sorting the list
 setInterval(() => {
-  for (const row of listEl.querySelectorAll(".row")) {
+  for (const row of sbList.querySelectorAll(".sb-row")) {
     const s = sessions.get(row.dataset.id);
     if (!s) continue;
-    const ageEl = row.querySelector(".age");
+    const ageEl = row.querySelector(".sb-age");
     if (ageEl) ageEl.textContent = fmtAge(s.lastActivity);
   }
-  if (selectedId && drawerOpen) {
-    const vals = drawerBody.querySelectorAll(".metric-value");
+  if (selectedId) {
+    const vals = detailEl.querySelectorAll(".metric-value");
     const s = sessions.get(selectedId);
     if (s && vals.length >= 2) {
       vals[0].textContent = fmtAge(s.lastActivity);
@@ -844,6 +806,5 @@ setInterval(() => {
 // ============================================================
 restore();
 renderChips();
-renderList();
-updateScopePill();
+renderSidebar();
 connect();
