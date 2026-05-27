@@ -13,11 +13,24 @@ import (
 //go:embed web/*
 var webFS embed.FS
 
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 func main() {
 	port := flag.String("port", "7777", "HTTP port")
 	dir := flag.String("dir", defaultProjectsDir(), "Claude projects directory")
 	stale := flag.Duration("stale", 7*24*time.Hour, "Hide sessions idle longer than this (0 to disable)")
+	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		log.SetFlags(0)
+		log.Printf("claude-sessions %s (commit %s, built %s)", version, commit, date)
+		return
+	}
 
 	if _, err := os.Stat(*dir); err != nil {
 		log.Fatalf("projects dir not found: %s (%v)", *dir, err)

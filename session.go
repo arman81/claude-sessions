@@ -20,23 +20,23 @@ const (
 )
 
 type Session struct {
-	ID                  string       `json:"id"`
-	FilePath            string       `json:"-"`
-	CWD                 string       `json:"cwd"`
-	Project             string       `json:"project"`
-	GitBranch           string       `json:"gitBranch"`
-	Version             string       `json:"version"`
-	StartedAt           time.Time    `json:"startedAt"`
-	LastActivity        time.Time    `json:"lastActivity"`
-	State               SessionState `json:"state"`
-	MessageCount        int          `json:"messageCount"`
-	UserMessageCount    int          `json:"userMessageCount"`
-	FirstUserMessage    string       `json:"firstUserMessage"`
-	LastUserMessage     string       `json:"lastUserMessage"`
-	LastAssistantText   string       `json:"lastAssistantText"`
-	LastToolName        string       `json:"lastToolName"`
-	PermissionMode      string       `json:"permissionMode"`
-	SizeBytes           int64        `json:"sizeBytes"`
+	ID                string       `json:"id"`
+	FilePath          string       `json:"-"`
+	CWD               string       `json:"cwd"`
+	Project           string       `json:"project"`
+	GitBranch         string       `json:"gitBranch"`
+	Version           string       `json:"version"`
+	StartedAt         time.Time    `json:"startedAt"`
+	LastActivity      time.Time    `json:"lastActivity"`
+	State             SessionState `json:"state"`
+	MessageCount      int          `json:"messageCount"`
+	UserMessageCount  int          `json:"userMessageCount"`
+	FirstUserMessage  string       `json:"firstUserMessage"`
+	LastUserMessage   string       `json:"lastUserMessage"`
+	LastAssistantText string       `json:"lastAssistantText"`
+	LastToolName      string       `json:"lastToolName"`
+	PermissionMode    string       `json:"permissionMode"`
+	SizeBytes         int64        `json:"sizeBytes"`
 }
 
 type rawEntry struct {
@@ -58,11 +58,11 @@ type rawMessage struct {
 }
 
 type contentBlock struct {
-	Type       string          `json:"type"`
-	Text       string          `json:"text"`
-	Name       string          `json:"name"`
-	ToolUseID  string          `json:"tool_use_id"`
-	Content    json.RawMessage `json:"content"`
+	Type      string          `json:"type"`
+	Text      string          `json:"text"`
+	Name      string          `json:"name"`
+	ToolUseID string          `json:"tool_use_id"`
+	Content   json.RawMessage `json:"content"`
 }
 
 const maxLineSize = 32 * 1024 * 1024 // 32MB — tool results can be huge
