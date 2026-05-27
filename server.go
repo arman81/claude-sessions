@@ -53,7 +53,7 @@ func (s *Server) filterStale(in []*Session) []*Session {
 	cutoff := time.Now().Add(-s.maxIdle)
 	out := make([]*Session, 0, len(in))
 	for _, sess := range in {
-		if sess.LastActivity.After(cutoff) {
+		if sess.Live || sess.LastActivity.After(cutoff) {
 			out = append(out, sess)
 		}
 	}

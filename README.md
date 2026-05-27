@@ -18,12 +18,12 @@ Useful when you have 10+ Claude Code sessions open in parallel and lose track of
 
 ## Features
 
-- **Discovers every Claude Code session** on your machine by tailing `~/.claude/projects/**/*.jsonl`
-- **Card-based dashboard** — project, git branch, last prompt, state, message count, last activity
+- **Distinguishes live vs exited sessions** — uses `pgrep` + per-PID `cwd` to attribute JSONL files to actually-running `claude` processes (not the dozens of historical files that pile up over time)
+- **Collapsible sidebar** grouped by state — Running / Waiting / Thinking / Idle / Exited
+- **Summary pane** with metrics, transcript, and copy-to-clipboard `claude --resume <id>`
 - **Live updates** via Server-Sent Events — new messages reflect within milliseconds
-- **State detection** — `waiting_user`, `running_tool`, `thinking`, or `idle`
-- **Filter + search** — by state, project, branch, or prompt text
-- **Transcript view** — click any card to see the full conversation
+- **Material Design 3 dark theme**
+- **Search** by project, branch, or prompt text
 - **Zero impact** on running Claude sessions — read-only file tailing, no hooks, no IPC
 
 ## Install
@@ -60,24 +60,16 @@ claude-sessions
 # → open http://localhost:7777
 ```
 
-### Flags
-
-| Flag | Default | Description |
-|---|---|---|
-| `-port` | `7777` | HTTP port |
-| `-dir` | `~/.claude/projects` | Claude projects directory |
-| `-stale` | `168h` (7d) | Hide sessions idle longer than this. `0` to disable. |
-| `-version` | — | Print version and exit |
-
 ## How it works
 
-Every running `claude` instance appends to a JSONL file at `~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl`.
+Every running `claude` instance appends to a JSONL file at `~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl`. The file is *not* deleted on exit, so over time each project directory accumulates many historical JSONLs.
 
 This tool:
 
-1. Scans that directory at startup and parses each session
+1. Scans `~/.claude/projects` at startup and parses each JSONL
 2. Subscribes to filesystem events via `fsnotify` (FSEvents on macOS, inotify on Linux, ReadDirectoryChangesW on Windows)
-3. Re-parses each file on change (debounced 150ms) and pushes deltas to the browser over SSE
+3. Every 5 seconds, runs **liveness detection**: `pgrep -x claude` for PIDs, then per-PID cwd via `lsof` (or `/proc/<pid>/cwd` on Linux). For each `cwd`, the N most-recently-modified JSONLs in that project directory are claimed as live, where N = number of claude PIDs with that cwd.
+4. Re-parses each file on change (debounced 150ms) and pushes deltas to the browser over SSE
 
 No hooks, no process attachment, no Claude Code modification. The tool can't slow your sessions down because it never touches them — it only reads files they already write.
 
@@ -92,7 +84,7 @@ No hooks, no process attachment, no Claude Code modification. The tool can't slo
 
 ### State detection
 
-State is derived from the last non-metadata entry in each JSONL plus the file mtime:
+Each session is `live` (has a running `claude` process) or `exited`. Among live sessions, the activity state is derived from the last non-metadata entry in the JSONL plus the file mtime:
 
 | Last entry | mtime age | State |
 |---|---|---|
@@ -100,6 +92,17 @@ State is derived from the last non-metadata entry in each JSONL plus the file mt
 | assistant with unresolved `tool_use` | < 2 min | `running_tool` |
 | user with `tool_result` | < 1 min | `thinking` |
 | anything else / older | — | `idle` |
+
+Exited sessions are hidden by default. Toggle **Show exited** in the sidebar to see them.
+
+### Flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `-port` | `7777` | HTTP port |
+| `-dir` | `~/.claude/projects` | Claude projects directory |
+| `-stale` | `0` | Hide exited sessions idle longer than this. `0` means keep all (just toggle visibility in the UI). |
+| `-version` | — | Print version and exit |
 
 ## Development
 

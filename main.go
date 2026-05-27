@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"time"
 )
 
 //go:embed web/*
@@ -22,7 +21,7 @@ var (
 func main() {
 	port := flag.String("port", "7777", "HTTP port")
 	dir := flag.String("dir", defaultProjectsDir(), "Claude projects directory")
-	stale := flag.Duration("stale", 7*24*time.Hour, "Hide sessions idle longer than this (0 to disable)")
+	stale := flag.Duration("stale", 0, "Hide exited sessions idle longer than this (0 = show all in 'exited' group)")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 

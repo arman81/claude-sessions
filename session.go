@@ -29,6 +29,7 @@ type Session struct {
 	StartedAt         time.Time    `json:"startedAt"`
 	LastActivity      time.Time    `json:"lastActivity"`
 	State             SessionState `json:"state"`
+	Live              bool         `json:"live"`
 	MessageCount      int          `json:"messageCount"`
 	UserMessageCount  int          `json:"userMessageCount"`
 	FirstUserMessage  string       `json:"firstUserMessage"`
