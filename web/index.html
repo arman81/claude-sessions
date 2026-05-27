@@ -7,57 +7,93 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <aside id="sidebar" class="sidebar">
-    <div class="sidebar-head">
-      <div class="brand">
-        <span class="brand-dot"></span>
-        <span class="brand-name">claude-sessions</span>
-      </div>
-      <button id="collapse-btn" class="icon-btn" title="Collapse sidebar" aria-label="collapse">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="15 18 9 12 15 6"></polyline>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">claude-sessions</div>
+
+      <div class="search">
+        <svg class="search-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
         </svg>
-        <span class="state-layer"></span>
+        <input id="search" type="search" placeholder="Filter sessions" spellcheck="false" />
+        <kbd class="kbd-hint">/</kbd>
+      </div>
+
+      <button id="scope-pill" class="scope-pill" title="Click to clear all filters">
+        <span class="scope-dot"></span>
+        <span id="scope-count">0</span>
+        <span class="scope-label">live</span>
+        <span class="scope-x" aria-hidden="true">×</span>
       </button>
+
+      <button id="help-btn" class="icon-btn" title="Keyboard shortcuts (?)" aria-label="help">?</button>
     </div>
 
-    <div class="sidebar-search">
-      <div class="search-bar">
-        <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="11" cy="11" r="8"></circle>
-          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-        </svg>
-        <input id="search" type="search" placeholder="Search sessions" />
+    <div class="chips" id="chips">
+      <button class="chip" data-chip="live"    aria-pressed="false">Live    <span class="chip-count" data-count="live">0</span></button>
+      <button class="chip" data-chip="waiting" aria-pressed="false">Waiting <span class="chip-count" data-count="waiting">0</span></button>
+      <button class="chip" data-chip="exited"  aria-pressed="false">Exited  <span class="chip-count" data-count="exited">0</span></button>
+      <div class="chip chip-dropdown" id="repo-dropdown">
+        <button class="chip-dropdown-btn" id="repo-btn" aria-haspopup="true" aria-expanded="false">
+          <span>Repo: <span id="repo-label">All</span></span>
+          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
+        <div class="chip-dropdown-menu hidden" id="repo-menu" role="menu"></div>
       </div>
     </div>
+  </header>
 
-    <div class="sidebar-status">
-      <span id="status-text">connecting</span>
-      <label class="switch">
-        <input type="checkbox" id="show-exited" />
-        <span class="switch-track"><span class="switch-thumb"></span></span>
-        <span class="switch-label">Show exited</span>
-      </label>
+  <main class="page">
+    <ul id="list" class="list" role="listbox" aria-label="sessions"></ul>
+
+    <div id="empty-state" class="empty hidden">
+      <p class="empty-headline">No sessions match this filter.</p>
+      <button class="btn-ghost" id="empty-clear">Clear filters</button>
     </div>
+  </main>
 
-    <div id="groups" class="groups"></div>
+  <aside id="drawer" class="drawer hidden" role="complementary" aria-label="session detail">
+    <header class="drawer-head">
+      <div class="drawer-head-titles">
+        <h2 id="drawer-title">—</h2>
+        <div id="drawer-sub" class="drawer-sub"></div>
+      </div>
+      <div class="drawer-head-actions">
+        <button id="drawer-expand" class="icon-btn" title="Expand / collapse split" aria-label="expand">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+        </button>
+        <button id="drawer-close" class="icon-btn" title="Close (Esc)" aria-label="close">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+    </header>
+    <div id="drawer-body" class="drawer-body"></div>
   </aside>
 
-  <main id="main" class="main">
-    <div id="empty-main" class="empty-main">
-      <div class="empty-icon">
-        <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.25">
-          <rect x="3" y="4" width="18" height="14" rx="3"/>
-          <line x1="3" y1="10" x2="21" y2="10"/>
-          <circle cx="7" cy="7" r="0.6" fill="currentColor"/>
-          <circle cx="9" cy="7" r="0.6" fill="currentColor"/>
-        </svg>
-      </div>
-      <h2>Select a session</h2>
-      <p>Pick one from the sidebar to see its summary, transcript, and metadata.</p>
+  <div id="palette-scrim" class="palette-scrim hidden" aria-hidden="true"></div>
+  <div id="palette" class="palette hidden" role="dialog" aria-label="command palette">
+    <div class="palette-input-row">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input id="palette-input" type="text" placeholder="Type to find sessions, filters, actions…" spellcheck="false" autocomplete="off" />
+      <kbd class="kbd-hint">esc</kbd>
     </div>
-    <div id="detail" class="detail"></div>
-  </main>
+    <div id="palette-results" class="palette-results"></div>
+  </div>
+
+  <div id="help-scrim" class="palette-scrim hidden"></div>
+  <div id="help" class="help-modal hidden" role="dialog" aria-label="shortcuts">
+    <h3>Keyboard shortcuts</h3>
+    <dl class="shortcuts">
+      <dt><kbd>/</kbd></dt>                          <dd>Focus the filter search</dd>
+      <dt><kbd>⌘</kbd><kbd>K</kbd></dt>              <dd>Open command palette</dd>
+      <dt><kbd>↑</kbd> <kbd>↓</kbd> <kbd>j</kbd> <kbd>k</kbd></dt> <dd>Move selection</dd>
+      <dt><kbd>↵</kbd></dt>                          <dd>Open session</dd>
+      <dt><kbd>esc</kbd></dt>                        <dd>Close drawer or palette</dd>
+      <dt><kbd>c</kbd></dt>                          <dd>Copy <code>claude --resume</code> for selection</dd>
+      <dt><kbd>?</kbd></dt>                          <dd>Show this help</dd>
+    </dl>
+    <p class="shortcuts-note">In the palette: type <code>is:live</code>, <code>is:waiting</code>, <code>is:exited</code>, or <code>repo:&lt;name&gt;</code> alongside free text to filter inline.</p>
+  </div>
 
   <script src="app.js"></script>
 </body>

@@ -1,61 +1,93 @@
 // ============================================================
+// claude-sessions v1
+// One list. One drawer. Every action a keystroke away.
+// ============================================================
+
+const STORAGE = "cs:v1";
+
+// ============================================================
 // State
 // ============================================================
-const sessions = new Map();
+const sessions = new Map();   // id -> session
+let visibleIds = [];          // ordered list IDs currently in DOM
 let selectedId = null;
-let searchQuery = "";
-let showExited = false;
+let drawerOpen = false;
+let drawerSplit = false;
+let paletteOpen = false;
+let paletteQuery = "";
+let paletteCursor = 0;
+let paletteRows = [];         // current rows in the palette
+let helpOpen = false;
 let transcriptExpanded = false;
-const expandedGroups = new Set(["__needs__", "__recent__"]); // default-expanded
-let structure = null; // stable cached order — only rebuilt on structural change
-let renderQueued = false;
+
+const filters = {
+  live: true,                 // default: Live ON
+  waiting: false,
+  exited: false,
+  repos: new Set(),           // selected repo names (empty = all)
+  search: "",                 // top-bar search query
+};
 
 // ============================================================
 // DOM
 // ============================================================
-const groupsEl   = document.getElementById("groups");
-const emptyMain  = document.getElementById("empty-main");
-const detailEl   = document.getElementById("detail");
-const statusEl   = document.getElementById("status-text");
-const searchEl   = document.getElementById("search");
-const collapseBtn = document.getElementById("collapse-btn");
-const showExitedCb = document.getElementById("show-exited");
+const $ = id => document.getElementById(id);
+
+const listEl       = $("list");
+const emptyEl      = $("empty-state");
+const emptyClearBtn= $("empty-clear");
+const searchEl     = $("search");
+const chipsEl      = $("chips");
+const scopePill    = $("scope-pill");
+const scopeCountEl = $("scope-count");
+const helpBtn      = $("help-btn");
+
+const drawerEl     = $("drawer");
+const drawerTitle  = $("drawer-title");
+const drawerSub    = $("drawer-sub");
+const drawerBody   = $("drawer-body");
+const drawerClose  = $("drawer-close");
+const drawerExpand = $("drawer-expand");
+
+const paletteEl    = $("palette");
+const paletteScrim = $("palette-scrim");
+const paletteInput = $("palette-input");
+const paletteResults= $("palette-results");
+
+const helpEl       = $("help");
+const helpScrim    = $("help-scrim");
+
+const repoBtn      = $("repo-btn");
+const repoLabel    = $("repo-label");
+const repoMenu     = $("repo-menu");
+const repoWrap     = $("repo-dropdown");
 
 // ============================================================
 // Helpers
 // ============================================================
-function escapeHTML(s) {
-  return (s ?? "").toString().replace(/[&<>"']/g, c => ({
-    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
-  })[c]);
+function esc(s) {
+  return (s ?? "").toString().replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
 }
 
-function fmtAgo(iso) {
+function fmtAge(iso) {
   if (!iso) return "—";
-  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
-  if (diff < 5) return "now";
-  if (diff < 60) return `${Math.floor(diff)}s`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
-  if (diff < 86400 * 7) return `${Math.floor(diff / 86400)}d`;
-  return `${Math.floor(diff / 86400 / 7)}w`;
-}
-
-function ageSeconds(iso) {
-  if (!iso) return Infinity;
-  return (Date.now() - new Date(iso).getTime()) / 1000;
+  const ms = Date.now() - new Date(iso).getTime();
+  const s = ms / 1000;
+  if (s < 5) return "now";
+  if (s < 60)   return `${Math.floor(s)}s`;
+  if (s < 3600) return `${Math.floor(s/60)}m`;
+  if (s < 86400)return `${Math.floor(s/3600)}h`;
+  if (s < 86400*7)  return `${Math.floor(s/86400)}d`;
+  if (s < 86400*28) return `${Math.floor(s/86400/7)}w`;
+  const d = new Date(iso);
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function fmtBytes(n) {
   if (n == null) return "—";
   if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MB`;
-}
-
-function truncate(s, n) {
-  s = (s || "").replace(/\s+/g, " ").trim();
-  return s.length <= n ? s : s.slice(0, n - 1) + "…";
+  if (n < 1024*1024) return `${(n/1024).toFixed(1)} KB`;
+  return `${(n/1024/1024).toFixed(1)} MB`;
 }
 
 function rowKind(s) {
@@ -63,488 +95,755 @@ function rowKind(s) {
   return s.state || "idle";
 }
 
-function stateLabel(s) {
-  if (!s.live) return "Exited";
-  return {
-    running_tool: "Running tool",
-    thinking: "Thinking",
-    waiting_user: "Waiting for input",
-    idle: "Idle",
-  }[s.state] || "Idle";
-}
-
-function chipClass(s) {
-  if (!s.live) return "exited";
-  return ({
-    running_tool: "running",
-    thinking: "thinking",
-    waiting_user: "waiting",
-    idle: "idle",
-  })[s.state] || "idle";
-}
-
 function topicOf(s) {
-  return s.firstUserMessage || s.lastUserMessage || "";
+  return (s.firstUserMessage || s.lastUserMessage || "").replace(/\s+/g, " ").trim();
 }
 
-function passesSearch(s) {
-  if (!searchQuery) return true;
-  const q = searchQuery.toLowerCase();
-  return (
-    (s.project || "").toLowerCase().includes(q) ||
-    (s.cwd || "").toLowerCase().includes(q) ||
-    (s.gitBranch || "").toLowerCase().includes(q) ||
-    (s.firstUserMessage || "").toLowerCase().includes(q) ||
-    (s.lastUserMessage || "").toLowerCase().includes(q)
-  );
+function truncate(s, n) {
+  return s.length <= n ? s : s.slice(0, n - 1) + "…";
 }
 
-function isNeedsYou(s) {
-  return s.live && s.state === "waiting_user";
+function matches(s, q) {
+  if (!q) return true;
+  const lc = q.toLowerCase();
+  return (s.project || "").toLowerCase().includes(lc)
+      || (s.cwd || "").toLowerCase().includes(lc)
+      || (s.gitBranch || "").toLowerCase().includes(lc)
+      || (s.firstUserMessage || "").toLowerCase().includes(lc)
+      || (s.lastUserMessage || "").toLowerCase().includes(lc)
+      || (s.lastAssistantText || "").toLowerCase().includes(lc);
 }
 
-function isRecent(s) {
-  return s.live && ageSeconds(s.lastActivity) < 24 * 3600;
+function passesFilters(s) {
+  const anyStateFilter = filters.live || filters.waiting || filters.exited;
+  if (anyStateFilter) {
+    let pass = false;
+    if (filters.live    && s.live) pass = true;
+    if (filters.waiting && s.live && s.state === "waiting_user") pass = true;
+    if (filters.exited  && !s.live) pass = true;
+    if (!pass) return false;
+  }
+  if (filters.repos.size > 0 && !filters.repos.has(s.project || "")) return false;
+  if (!matches(s, filters.search)) return false;
+  return true;
+}
+
+function anyFilterActive() {
+  // "Live default" is the baseline; if only Live is true and nothing else, treat as default scope
+  return filters.waiting || filters.exited
+      || filters.repos.size > 0
+      || filters.search.length > 0
+      || !filters.live;   // user turned off Live
+}
+
+function clearAllFilters() {
+  filters.live = true;
+  filters.waiting = false;
+  filters.exited = false;
+  filters.repos.clear();
+  filters.search = "";
+  searchEl.value = "";
+  persist();
+  renderChips();
+  renderRepoMenu();
+  renderList();
+  updateScopePill();
 }
 
 // ============================================================
-// Ripple
+// Persistence
 // ============================================================
-function attachRipple(el) {
-  el.classList.add("ripple-host");
-  el.addEventListener("pointerdown", e => {
-    const rect = el.getBoundingClientRect();
-    const size = Math.max(rect.width, rect.height);
-    const ink = document.createElement("span");
-    ink.className = "ripple-ink";
-    ink.style.cssText = `width:${size}px;height:${size}px;left:${e.clientX - rect.left - size/2}px;top:${e.clientY - rect.top - size/2}px;`;
-    el.appendChild(ink);
-    ink.addEventListener("animationend", () => ink.remove());
+function persist() {
+  try {
+    localStorage.setItem(STORAGE, JSON.stringify({
+      live: filters.live,
+      waiting: filters.waiting,
+      exited: filters.exited,
+      repos: [...filters.repos],
+    }));
+  } catch {}
+}
+function restore() {
+  try {
+    const raw = localStorage.getItem(STORAGE);
+    if (!raw) return;
+    const j = JSON.parse(raw);
+    filters.live    = !!j.live;
+    filters.waiting = !!j.waiting;
+    filters.exited  = !!j.exited;
+    filters.repos   = new Set(j.repos || []);
+  } catch {}
+}
+
+// ============================================================
+// Render: list
+// ============================================================
+function renderList() {
+  const all = [...sessions.values()].filter(passesFilters);
+  all.sort((a, b) => new Date(b.lastActivity) - new Date(a.lastActivity));
+
+  visibleIds = all.map(s => s.id);
+  listEl.innerHTML = all.map(rowHTML).join("");
+
+  if (all.length === 0) {
+    emptyEl.classList.remove("hidden");
+    listEl.classList.add("hidden");
+  } else {
+    emptyEl.classList.add("hidden");
+    listEl.classList.remove("hidden");
+  }
+
+  // restore selection visual
+  if (selectedId) {
+    const r = listEl.querySelector(`[data-id="${CSS.escape(selectedId)}"]`);
+    if (r) r.setAttribute("aria-selected", "true");
+  }
+
+  updateCounts();
+}
+
+function rowHTML(s) {
+  const kind = rowKind(s);
+  const topic = topicOf(s);
+  const topicHTML = topic
+    ? `<span class="topic">${esc(truncate(topic, 80))}</span>`
+    : `<span class="topic placeholder">(no prompts yet)</span>`;
+
+  const branch = s.gitBranch && s.gitBranch !== "HEAD" ? s.gitBranch : "";
+  const metaParts = [];
+  if (s.project) metaParts.push(esc(s.project));
+  if (branch)    metaParts.push(esc(truncate(branch, 36)));
+  const meta = metaParts.length
+    ? metaParts.join(`<span class="sep">/</span>`)
+    : esc(s.cwd || "");
+
+  return `
+    <li class="row ${kind}" role="option" data-id="${esc(s.id)}" tabindex="-1" title="${esc(s.cwd || "")}\n${esc(topic)}">
+      <span class="dot"></span>
+      ${topicHTML}
+      <span class="meta">${meta}</span>
+      <span class="age">${fmtAge(s.lastActivity)}</span>
+    </li>
+  `;
+}
+
+function patchRow(s) {
+  const row = listEl.querySelector(`[data-id="${CSS.escape(s.id)}"]`);
+  if (!row) return false;
+
+  const kinds = ["running","thinking","waiting","idle","exited"];
+  row.classList.remove(...kinds);
+  row.classList.add(rowKind(s));
+
+  const topicEl = row.querySelector(".topic");
+  const topic = topicOf(s);
+  if (topicEl) {
+    if (topic) {
+      topicEl.classList.remove("placeholder");
+      topicEl.textContent = truncate(topic, 80);
+    } else {
+      topicEl.classList.add("placeholder");
+      topicEl.textContent = "(no prompts yet)";
+    }
+  }
+  const ageEl = row.querySelector(".age");
+  if (ageEl) ageEl.textContent = fmtAge(s.lastActivity);
+  return true;
+}
+
+// ============================================================
+// Render: chips + scope pill + repo menu
+// ============================================================
+function renderChips() {
+  for (const btn of chipsEl.querySelectorAll(".chip[data-chip]")) {
+    const k = btn.dataset.chip;
+    btn.setAttribute("aria-pressed", String(!!filters[k]));
+  }
+  if (filters.repos.size > 0) {
+    repoWrap.dataset.active = "true";
+    repoLabel.textContent = filters.repos.size === 1 ? [...filters.repos][0] : `${filters.repos.size}`;
+  } else {
+    repoWrap.dataset.active = "false";
+    repoLabel.textContent = "All";
+  }
+}
+
+function updateCounts() {
+  const counts = { live: 0, waiting: 0, exited: 0 };
+  for (const s of sessions.values()) {
+    if (s.live) {
+      counts.live++;
+      if (s.state === "waiting_user") counts.waiting++;
+    } else {
+      counts.exited++;
+    }
+  }
+  for (const el of chipsEl.querySelectorAll(".chip-count")) {
+    const k = el.dataset.count;
+    el.textContent = counts[k];
+  }
+  scopeCountEl.textContent = counts.live;
+}
+
+function updateScopePill() {
+  if (anyFilterActive()) {
+    scopePill.classList.add("actionable");
+    scopePill.title = "Clear all filters";
+  } else {
+    scopePill.classList.remove("actionable");
+    scopePill.title = "";
+  }
+}
+
+function renderRepoMenu() {
+  const byRepo = new Map();
+  for (const s of sessions.values()) {
+    const k = s.project || "(no project)";
+    byRepo.set(k, (byRepo.get(k) || 0) + 1);
+  }
+  const sorted = [...byRepo.entries()].sort((a,b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+
+  const html = [];
+  if (filters.repos.size > 0) {
+    html.push(`<div class="repo-opt-clear" data-action="clear">Clear repo filter</div>`);
+  }
+  for (const [repo, n] of sorted) {
+    const checked = filters.repos.has(repo);
+    html.push(`
+      <label class="repo-opt">
+        <input type="checkbox" ${checked ? "checked" : ""} data-repo="${esc(repo)}" />
+        <span>${esc(repo)}</span>
+        <span class="repo-opt-count">${n}</span>
+      </label>
+    `);
+  }
+  repoMenu.innerHTML = html.join("");
+
+  for (const cb of repoMenu.querySelectorAll("input[data-repo]")) {
+    cb.addEventListener("change", e => {
+      const r = e.target.dataset.repo;
+      if (e.target.checked) filters.repos.add(r);
+      else filters.repos.delete(r);
+      persist();
+      renderChips();
+      renderList();
+      updateScopePill();
+    });
+  }
+  const clear = repoMenu.querySelector('[data-action="clear"]');
+  if (clear) clear.addEventListener("click", () => {
+    filters.repos.clear();
+    persist();
+    renderChips();
+    renderRepoMenu();
+    renderList();
+    updateScopePill();
   });
 }
 
 // ============================================================
-// Structure: cached stable order
+// Selection + drawer
 // ============================================================
-function buildStructure() {
-  const all = [...sessions.values()].filter(passesSearch);
-
-  const needsYouIds = all.filter(isNeedsYou)
-    .sort((a, b) => new Date(b.lastActivity) - new Date(a.lastActivity))
-    .map(s => s.id);
-
-  // Recent live sessions (last 24h), excluding ones already in needs-you
-  const recentIds = all
-    .filter(s => isRecent(s) && !needsYouIds.includes(s.id))
-    .sort((a, b) => new Date(b.lastActivity) - new Date(a.lastActivity))
-    .slice(0, 8)
-    .map(s => s.id);
-
-  // Everything else, grouped by project (repo)
-  const dedup = new Set([...needsYouIds, ...recentIds]);
-  const byRepo = new Map();
-  for (const s of all) {
-    if (dedup.has(s.id)) continue;
-    if (!s.live && !showExited) continue;
-    const key = s.project || "(no project)";
-    if (!byRepo.has(key)) byRepo.set(key, []);
-    byRepo.get(key).push(s);
-  }
-
-  // Sort repos by total live count desc, then name
-  const repoOrder = [...byRepo.entries()]
-    .map(([repo, list]) => {
-      list.sort((a, b) => new Date(b.lastActivity) - new Date(a.lastActivity));
-      const liveCount = list.filter(s => s.live).length;
-      return { repo, ids: list.map(s => s.id), liveCount, total: list.length };
-    })
-    .sort((a, b) => b.liveCount - a.liveCount || a.repo.localeCompare(b.repo));
-
-  structure = { needsYouIds, recentIds, repoOrder };
-}
-
-// ============================================================
-// Render
-// ============================================================
-function render() {
-  if (!structure) buildStructure();
-  const parts = [];
-
-  if (structure.needsYouIds.length) {
-    parts.push(groupHTML({
-      key: "__needs__",
-      label: "Needs you",
-      icon: '<svg class="group-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>',
-      sessionIds: structure.needsYouIds,
-      crossRepo: true,
-    }));
-  }
-
-  if (structure.recentIds.length) {
-    parts.push(groupHTML({
-      key: "__recent__",
-      label: "Recent (24h)",
-      icon: '<svg class="group-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
-      sessionIds: structure.recentIds,
-      crossRepo: true,
-    }));
-  }
-
-  for (const r of structure.repoOrder) {
-    parts.push(groupHTML({
-      key: `repo:${r.repo}`,
-      label: r.repo,
-      icon: '<svg class="group-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
-      sessionIds: r.ids,
-      crossRepo: false,
-      countLabel: `${r.liveCount}${r.total > r.liveCount ? `/${r.total}` : ""}`,
-    }));
-  }
-
-  const empty = parts.length === 0;
-  groupsEl.innerHTML = empty
-    ? `<div style="padding:32px 16px;font-size:13px;color:var(--md-on-surface-variant);text-align:center;">No sessions to show.${searchQuery ? "" : (showExited ? "" : "<br><small>Toggle <em>Show exited</em> to see history.</small>")}</div>`
-    : parts.join("");
-
-  // Wire up interactions
-  for (const head of groupsEl.querySelectorAll(".group-head")) {
-    attachRipple(head);
-    head.addEventListener("click", () => toggleGroup(head.dataset.group));
-  }
-  for (const item of groupsEl.querySelectorAll(".session-item")) {
-    attachRipple(item);
-    item.addEventListener("click", () => selectSession(item.dataset.id));
-  }
-}
-
-function groupHTML({ key, label, icon, sessionIds, crossRepo, countLabel }) {
-  const expanded = expandedGroups.has(key);
-  return `
-    <div class="group ${expanded ? "" : "collapsed"}">
-      <div class="group-head" data-group="${escapeHTML(key)}">
-        <span class="state-layer"></span>
-        <svg class="group-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
-        ${icon}
-        <span class="group-label">${escapeHTML(label)}</span>
-        <span class="group-count">${escapeHTML(countLabel ?? String(sessionIds.length))}</span>
-      </div>
-      <div class="group-body">
-        ${sessionIds.map(id => sessionItemHTML(sessions.get(id), crossRepo)).filter(Boolean).join("")}
-      </div>
-    </div>
-  `;
-}
-
-function sessionItemHTML(s, crossRepo) {
-  if (!s) return "";
-  const kind = rowKind(s);
-  const sel = s.id === selectedId ? "selected" : "";
-
-  const topic = topicOf(s);
-  const title = topic ? truncate(topic, 64) : "(no prompts yet)";
-  const titleClass = topic ? "" : "placeholder";
-
-  const branch = s.gitBranch && s.gitBranch !== "HEAD" ? s.gitBranch : "";
-  const subParts = [];
-  if (crossRepo && s.project) subParts.push(`<span>${escapeHTML(s.project)}</span>`);
-  if (branch) subParts.push(`<span class="mono">${escapeHTML(truncate(branch, 32))}</span>`);
-  if (!branch && !crossRepo) subParts.push(`<span class="mono">${escapeHTML(truncate(s.cwd || "", 40))}</span>`);
-
-  const subHTML = subParts.length
-    ? subParts.join('<span class="sep">·</span>')
-    : `<span class="mono">${escapeHTML(s.id.slice(0, 8))}</span>`;
-
-  return `
-    <div class="session-item session-${kind} ${sel}" data-id="${escapeHTML(s.id)}" title="${escapeHTML(s.cwd || "")}">
-      <span class="state-layer"></span>
-      <span class="session-dot"></span>
-      <span class="session-text">
-        <span class="session-title ${titleClass}">${escapeHTML(title)}</span>
-        <span class="session-sub">${subHTML}</span>
-      </span>
-      <span class="session-time">${fmtAgo(s.lastActivity)}</span>
-    </div>
-  `;
-}
-
-function toggleGroup(key) {
-  if (expandedGroups.has(key)) expandedGroups.delete(key);
-  else expandedGroups.add(key);
-  saveCollapsedState();
-  render();
-}
-
-function saveCollapsedState() {
-  try {
-    localStorage.setItem("cs:expanded", JSON.stringify([...expandedGroups]));
-  } catch {}
-}
-
-function loadCollapsedState() {
-  try {
-    const raw = localStorage.getItem("cs:expanded");
-    if (raw) {
-      const arr = JSON.parse(raw);
-      expandedGroups.clear();
-      for (const k of arr) expandedGroups.add(k);
-    }
-  } catch {}
-}
-
-// ============================================================
-// Detail pane
-// ============================================================
-function selectSession(id) {
+function selectAndOpen(id) {
   selectedId = id;
-  transcriptExpanded = false;
-  for (const el of groupsEl.querySelectorAll(".session-item")) {
-    el.classList.toggle("selected", el.dataset.id === id);
+  for (const r of listEl.querySelectorAll(".row")) {
+    r.setAttribute("aria-selected", r.dataset.id === id ? "true" : "false");
   }
-  renderDetail();
+  openDrawer();
+  renderDrawer();
 }
 
-function renderDetail() {
-  const s = sessions.get(selectedId);
-  if (!s) {
-    detailEl.classList.add("hidden");
-    emptyMain.classList.remove("hidden");
-    return;
+function moveSelection(delta) {
+  if (visibleIds.length === 0) return;
+  let idx = selectedId ? visibleIds.indexOf(selectedId) : -1;
+  if (idx < 0) idx = -1;
+  idx = Math.max(0, Math.min(visibleIds.length - 1, idx + delta));
+  const id = visibleIds[idx];
+  selectedId = id;
+  for (const r of listEl.querySelectorAll(".row")) {
+    r.setAttribute("aria-selected", r.dataset.id === id ? "true" : "false");
   }
-  emptyMain.classList.add("hidden");
-  detailEl.classList.remove("hidden");
+  const row = listEl.querySelector(`[data-id="${CSS.escape(id)}"]`);
+  if (row) row.scrollIntoView({ block: "nearest" });
+  if (drawerOpen) renderDrawer();
+}
+
+function openDrawer() {
+  drawerOpen = true;
+  drawerEl.classList.remove("hidden");
+}
+
+function closeDrawer() {
+  drawerOpen = false;
+  drawerEl.classList.add("hidden");
+}
+
+function toggleDrawerSplit() {
+  drawerSplit = !drawerSplit;
+  drawerEl.classList.toggle("split", drawerSplit);
+}
+
+function stateChipHTML(s) {
+  const map = {
+    running_tool: { c: "running",  l: "Running tool" },
+    thinking:     { c: "thinking", l: "Thinking" },
+    waiting_user: { c: "waiting",  l: "Waiting for input" },
+    idle:         { c: "idle",     l: "Idle" },
+  };
+  const item = s.live ? (map[s.state] || map.idle) : { c: "exited", l: "Exited" };
+  return `<span class="state-chip ${item.c}"><span class="state-chip-dot"></span>${item.l}</span>`;
+}
+
+function renderDrawer() {
+  const s = sessions.get(selectedId);
+  if (!s) return;
+
+  drawerTitle.textContent = s.project || "(no project)";
+  const branch = s.gitBranch && s.gitBranch !== "HEAD" ? s.gitBranch : "—";
+  drawerSub.innerHTML = `${esc(branch)} <span style="color:var(--text-mute)">·</span> ${esc(s.cwd || "")}`;
 
   const topic = topicOf(s);
-  const branch = s.gitBranch && s.gitBranch !== "HEAD" ? s.gitBranch : "—";
-
-  detailEl.innerHTML = `
-    <div class="detail-head">
-      <div class="detail-title">
-        <span class="detail-project">${escapeHTML(s.project || "(no project)")}</span>
-        <span class="detail-branch">${escapeHTML(branch)}</span>
-        <span class="chip ${chipClass(s)}">
-          <span class="chip-dot"></span>
-          ${stateLabel(s)}
-        </span>
-      </div>
-      <div class="detail-cwd">${escapeHTML(s.cwd || "")}</div>
+  drawerBody.innerHTML = `
+    <div class="section">
+      <h3>State</h3>
+      ${stateChipHTML(s)}
     </div>
 
-    <div class="card">
+    <div class="section">
       <h3>Topic</h3>
-      <div class="summary-topic">${escapeHTML(topic || "(no user messages yet)")}</div>
-      <div class="metrics">
-        <div class="metric"><span class="metric-value">${fmtAgo(s.lastActivity)}</span><span class="metric-label">Last activity</span></div>
-        <div class="metric"><span class="metric-value">${fmtAgo(s.startedAt)}</span><span class="metric-label">Started</span></div>
-        <div class="metric"><span class="metric-value">${s.messageCount}</span><span class="metric-label">Messages</span></div>
-        <div class="metric"><span class="metric-value">${s.userMessageCount}</span><span class="metric-label">User turns</span></div>
+      <div class="summary-card ${topic ? "" : "placeholder"}">${esc(topic || "(no user messages yet)")}</div>
+      <div class="metric-row">
+        <div class="metric"><div class="metric-value">${fmtAge(s.lastActivity)}</div><div class="metric-label">Last activity</div></div>
+        <div class="metric"><div class="metric-value">${fmtAge(s.startedAt)}</div><div class="metric-label">Started</div></div>
+        <div class="metric"><div class="metric-value">${s.messageCount}</div><div class="metric-label">Messages</div></div>
+        <div class="metric"><div class="metric-value">${s.userMessageCount}</div><div class="metric-label">User turns</div></div>
       </div>
     </div>
 
-    <div class="card">
+    <div class="section">
+      <h3>Resume</h3>
+      <div class="resume">
+        <code id="resume-code">claude --resume ${esc(s.id)}</code>
+        <button class="btn-tonal" id="copy-resume">Copy</button>
+      </div>
+    </div>
+
+    <div class="section">
       <h3>Metadata</h3>
-      <dl class="kv-row"><dt>Session ID</dt><dd>${escapeHTML(s.id)}</dd></dl>
-      <dl class="kv-row"><dt>Last tool</dt><dd>${escapeHTML(s.lastToolName || "—")}</dd></dl>
-      <dl class="kv-row"><dt>Permission</dt><dd>${escapeHTML(s.permissionMode || "—")}</dd></dl>
-      <dl class="kv-row"><dt>Version</dt><dd>${escapeHTML(s.version || "—")}</dd></dl>
-      <dl class="kv-row"><dt>JSONL size</dt><dd>${fmtBytes(s.sizeBytes)}</dd></dl>
-      <dl class="kv-row"><dt>Resume</dt>
-        <dd class="resume-cmd">
-          <code id="resume-cmd">claude --resume ${escapeHTML(s.id)}</code>
-          <button class="btn-tonal" id="copy-resume"><span class="state-layer"></span>Copy</button>
-        </dd>
+      <dl class="kv-list">
+        <div class="kv"><dt>Session ID</dt><dd>${esc(s.id)}</dd></div>
+        <div class="kv"><dt>Last tool</dt><dd>${esc(s.lastToolName || "—")}</dd></div>
+        <div class="kv"><dt>Permission</dt><dd>${esc(s.permissionMode || "—")}</dd></div>
+        <div class="kv"><dt>Version</dt><dd>${esc(s.version || "—")}</dd></div>
+        <div class="kv"><dt>JSONL size</dt><dd>${fmtBytes(s.sizeBytes)}</dd></div>
       </dl>
     </div>
 
-    <div class="card">
+    <div class="section">
       <div class="transcript-head">
         <h3>Conversation</h3>
-        <div class="segmented" role="tablist">
-          <button class="${transcriptExpanded ? "" : "active"}" id="seg-recent"><span class="state-layer"></span>Last 4</button>
-          <button class="${transcriptExpanded ? "active" : ""}" id="seg-all"><span class="state-layer"></span>Full</button>
+        <div class="segmented">
+          <button id="seg-recent" class="${transcriptExpanded ? "" : "active"}">Last 4</button>
+          <button id="seg-all"    class="${transcriptExpanded ? "active" : ""}">Full</button>
         </div>
       </div>
-      <div id="transcript">loading…</div>
+      <div id="transcript"><p style="color:var(--text-mute);font-size:12px;">Loading…</p></div>
     </div>
   `;
 
-  const copyBtn = document.getElementById("copy-resume");
-  attachRipple(copyBtn);
-  copyBtn.addEventListener("click", () => {
+  $("copy-resume").addEventListener("click", () => {
     navigator.clipboard.writeText(`claude --resume ${s.id}`);
-    copyBtn.querySelector("span:last-child")?.remove();
-    copyBtn.appendChild(document.createTextNode("Copied"));
-    setTimeout(() => { copyBtn.lastChild.textContent = "Copy"; }, 1200);
+    const b = $("copy-resume");
+    b.textContent = "Copied";
+    setTimeout(() => { b.textContent = "Copy"; }, 1200);
   });
-
-  const segRecent = document.getElementById("seg-recent");
-  const segAll = document.getElementById("seg-all");
-  attachRipple(segRecent);
-  attachRipple(segAll);
-  segRecent.addEventListener("click", () => { transcriptExpanded = false; renderDetail(); });
-  segAll.addEventListener("click",    () => { transcriptExpanded = true;  renderDetail(); });
+  $("seg-recent").addEventListener("click", () => { transcriptExpanded = false; renderDrawer(); });
+  $("seg-all").addEventListener("click",    () => { transcriptExpanded = true;  renderDrawer(); });
 
   loadTranscript(s.id);
 }
 
 async function loadTranscript(id) {
   try {
-    const r = await fetch(`/api/sessions/${encodeURIComponent(id)}/transcript`);
-    const turns = await r.json();
+    const res = await fetch(`/api/sessions/${encodeURIComponent(id)}/transcript`);
+    const turns = await res.json();
     if (id !== selectedId) return;
-    const el = document.getElementById("transcript");
+    const el = $("transcript");
     if (!turns || turns.length === 0) {
-      el.innerHTML = `<p style="color:var(--md-on-surface-variant);font-size:13px;">No turns yet.</p>`;
+      el.innerHTML = `<p style="color:var(--text-mute);font-size:12px;">No turns yet.</p>`;
       return;
     }
     const slice = transcriptExpanded ? turns : turns.slice(-4);
-    el.innerHTML = slice.map(turnHTML).join("");
-  } catch {
-    const el = document.getElementById("transcript");
-    if (el) el.innerHTML = `<p style="color:var(--md-on-surface-variant);">Failed to load transcript.</p>`;
-  }
-}
-
-function turnHTML(t) {
-  return `
-    <div class="turn ${t.role}">
-      <div class="turn-role">
-        <span>${t.role}</span>
-        <span class="turn-time">${fmtAgo(t.timestamp)}</span>
+    el.innerHTML = slice.map(t => `
+      <div class="turn ${t.role}">
+        <div class="turn-head"><span>${t.role}</span><span class="turn-time">${fmtAge(t.timestamp)}</span></div>
+        ${t.text ? `<div class="turn-text">${esc(t.text)}</div>` : ""}
+        ${t.toolName ? `<div class="turn-tool">↳ ${esc(t.toolName)}</div>` : ""}
       </div>
-      ${t.text ? `<div class="turn-text">${escapeHTML(t.text)}</div>` : ""}
-      ${t.toolName ? `<div class="turn-tool">↳ ${escapeHTML(t.toolName)}</div>` : ""}
-    </div>
-  `;
-}
-
-// ============================================================
-// Update flow — keep DOM order stable; only restructure on
-// structural changes (new id, group change, search/toggle).
-// ============================================================
-function scheduleRender(structural) {
-  if (structural) structure = null;
-  if (renderQueued) return;
-  renderQueued = true;
-  requestAnimationFrame(() => {
-    renderQueued = false;
-    if (!structure) buildStructure();
-    render();
-  });
-}
-
-function groupKey(s) {
-  // What top-level bucket would this session be in?
-  if (isNeedsYou(s)) return "__needs__";
-  if (isRecent(s))   return "__recent__";
-  if (!s.live && !showExited) return "__hidden__";
-  return `repo:${s.project || "(no project)"}`;
-}
-
-function onUpsert(s) {
-  const existing = sessions.get(s.id);
-  const oldKey = existing ? groupKey(existing) : null;
-  sessions.set(s.id, s);
-  const newKey = groupKey(s);
-
-  if (!existing || oldKey !== newKey) {
-    scheduleRender(true);
-  } else {
-    // Same bucket — just update the row in place (no reorder)
-    patchRow(s);
-    if (selectedId === s.id) renderDetail();
+    `).join("");
+  } catch {
+    const el = $("transcript");
+    if (el) el.innerHTML = `<p style="color:var(--text-mute);font-size:12px;">Failed to load transcript.</p>`;
   }
 }
 
-function patchRow(s) {
-  const row = groupsEl.querySelector(`.session-item[data-id="${CSS.escape(s.id)}"]`);
-  if (!row) { scheduleRender(true); return; }
-  const kindClasses = ["session-running","session-thinking","session-waiting","session-idle","session-exited"];
-  row.classList.remove(...kindClasses);
-  row.classList.add("session-" + rowKind(s));
+// ============================================================
+// Cmd+K command palette
+// ============================================================
+function openPalette() {
+  paletteOpen = true;
+  paletteEl.classList.remove("hidden");
+  paletteScrim.classList.remove("hidden");
+  paletteInput.value = "";
+  paletteQuery = "";
+  paletteCursor = 0;
+  renderPalette();
+  paletteInput.focus();
+}
 
-  const timeEl = row.querySelector(".session-time");
-  if (timeEl) timeEl.textContent = fmtAgo(s.lastActivity);
+function closePalette() {
+  paletteOpen = false;
+  paletteEl.classList.add("hidden");
+  paletteScrim.classList.add("hidden");
+}
 
-  const titleEl = row.querySelector(".session-title");
-  const topic = topicOf(s);
-  if (titleEl) {
-    if (topic) {
-      titleEl.classList.remove("placeholder");
-      titleEl.textContent = truncate(topic, 64);
+function parsePaletteQuery(q) {
+  // Extract is:foo / repo:foo tokens; remaining text is fuzzy
+  const tokens = q.trim().split(/\s+/);
+  const out = { isLive: null, isWaiting: null, isExited: null, repo: null, words: [] };
+  for (const t of tokens) {
+    if (!t) continue;
+    const m = /^([a-z]+):(.+)$/i.exec(t);
+    if (!m) { out.words.push(t.toLowerCase()); continue; }
+    const k = m[1].toLowerCase(), v = m[2].toLowerCase();
+    if (k === "is") {
+      if (v === "live") out.isLive = true;
+      if (v === "waiting") { out.isLive = true; out.isWaiting = true; }
+      if (v === "exited") out.isExited = true;
+    } else if (k === "repo") {
+      out.repo = v;
     } else {
-      titleEl.classList.add("placeholder");
-      titleEl.textContent = "(no prompts yet)";
+      out.words.push(t.toLowerCase());
     }
   }
+  return out;
+}
+
+function paletteScore(s, parsed) {
+  if (parsed.isLive    && !s.live) return -1;
+  if (parsed.isWaiting && s.state !== "waiting_user") return -1;
+  if (parsed.isExited  && s.live) return -1;
+  if (parsed.repo      && !(s.project || "").toLowerCase().includes(parsed.repo)) return -1;
+
+  if (parsed.words.length === 0) return 1;
+  let score = 0;
+  const hay = [
+    s.project || "",
+    s.gitBranch || "",
+    s.cwd || "",
+    s.firstUserMessage || "",
+    s.lastUserMessage || "",
+    s.lastAssistantText || "",
+  ].join(" ").toLowerCase();
+  for (const w of parsed.words) {
+    if (!hay.includes(w)) return -1;
+    score += w.length;
+  }
+  return score;
+}
+
+function renderPalette() {
+  const parsed = parsePaletteQuery(paletteQuery);
+  const ranked = [];
+  for (const s of sessions.values()) {
+    const sc = paletteScore(s, parsed);
+    if (sc < 0) continue;
+    ranked.push({ s, sc });
+  }
+  ranked.sort((a, b) => b.sc - a.sc || new Date(b.s.lastActivity) - new Date(a.s.lastActivity));
+  const top = ranked.slice(0, 20).map(r => r.s);
+
+  paletteRows = top.map(s => ({ type: "session", id: s.id, s }));
+
+  if (!paletteQuery.trim()) {
+    // Suggested actions when empty query
+    paletteRows.push({ type: "action", id: "act-toggle-exited", label: "Toggle Exited filter", hint: "is:exited" });
+    paletteRows.push({ type: "action", id: "act-toggle-live",   label: filters.live ? "Hide live sessions" : "Show live sessions", hint: "is:live" });
+    paletteRows.push({ type: "action", id: "act-clear",         label: "Clear all filters", hint: "" });
+    paletteRows.push({ type: "action", id: "act-help",          label: "Show keyboard shortcuts", hint: "?" });
+  }
+
+  if (paletteRows.length === 0) {
+    paletteResults.innerHTML = `<div class="palette-empty">No matches</div>`;
+    return;
+  }
+
+  paletteCursor = Math.min(paletteCursor, paletteRows.length - 1);
+
+  let html = "";
+  let lastType = null;
+  paletteRows.forEach((row, i) => {
+    if (row.type !== lastType) {
+      html += `<div class="palette-section-head">${row.type === "session" ? "Sessions" : "Actions"}</div>`;
+      lastType = row.type;
+    }
+    if (row.type === "session") {
+      const s = row.s;
+      const kind = rowKind(s);
+      const topic = topicOf(s) || "(no prompts yet)";
+      const meta = [s.project, s.gitBranch && s.gitBranch !== "HEAD" ? s.gitBranch : ""].filter(Boolean).join(" / ");
+      html += `
+        <div class="palette-row ${kind} ${i === paletteCursor ? "active" : ""}" data-idx="${i}">
+          <span class="dot"></span>
+          <span class="palette-title">${esc(truncate(topic, 60))}</span>
+          <span class="palette-sub">${esc(meta)}</span>
+          <span class="palette-kbd">${fmtAge(s.lastActivity)}</span>
+        </div>
+      `;
+    } else {
+      html += `
+        <div class="palette-row ${i === paletteCursor ? "active" : ""}" data-idx="${i}">
+          <span></span>
+          <span class="palette-title">${esc(row.label)}</span>
+          <span class="palette-sub">${esc(row.hint || "")}</span>
+          <span></span>
+        </div>
+      `;
+    }
+  });
+  paletteResults.innerHTML = html;
+
+  for (const r of paletteResults.querySelectorAll(".palette-row")) {
+    r.addEventListener("click", () => {
+      paletteCursor = parseInt(r.dataset.idx, 10);
+      paletteExecute();
+    });
+    r.addEventListener("mouseenter", () => {
+      paletteCursor = parseInt(r.dataset.idx, 10);
+      for (const x of paletteResults.querySelectorAll(".palette-row")) x.classList.remove("active");
+      r.classList.add("active");
+    });
+  }
+}
+
+function paletteMove(delta) {
+  if (paletteRows.length === 0) return;
+  paletteCursor = (paletteCursor + delta + paletteRows.length) % paletteRows.length;
+  for (const [i, r] of [...paletteResults.querySelectorAll(".palette-row")].entries()) {
+    r.classList.toggle("active", i === paletteCursor);
+    if (i === paletteCursor) r.scrollIntoView({ block: "nearest" });
+  }
+}
+
+function paletteExecute() {
+  const row = paletteRows[paletteCursor];
+  if (!row) return;
+  if (row.type === "session") {
+    closePalette();
+    selectAndOpen(row.id);
+  } else if (row.type === "action") {
+    switch (row.id) {
+      case "act-toggle-exited":
+        filters.exited = !filters.exited; persist(); renderChips(); renderList(); updateScopePill(); break;
+      case "act-toggle-live":
+        filters.live = !filters.live; persist(); renderChips(); renderList(); updateScopePill(); break;
+      case "act-clear":
+        clearAllFilters(); break;
+      case "act-help":
+        closePalette(); openHelp(); return;
+    }
+    closePalette();
+  }
 }
 
 // ============================================================
-// Controls
+// Help
 // ============================================================
+function openHelp() {
+  helpOpen = true;
+  helpEl.classList.remove("hidden");
+  helpScrim.classList.remove("hidden");
+}
+function closeHelp() {
+  helpOpen = false;
+  helpEl.classList.add("hidden");
+  helpScrim.classList.add("hidden");
+}
+
+// ============================================================
+// Event wiring
+// ============================================================
+chipsEl.addEventListener("click", e => {
+  const btn = e.target.closest(".chip[data-chip]");
+  if (!btn) return;
+  const k = btn.dataset.chip;
+  filters[k] = !filters[k];
+  persist();
+  renderChips();
+  renderList();
+  updateScopePill();
+});
+
+repoBtn.addEventListener("click", e => {
+  e.stopPropagation();
+  repoMenu.classList.toggle("hidden");
+  repoBtn.setAttribute("aria-expanded", String(!repoMenu.classList.contains("hidden")));
+});
+document.addEventListener("click", e => {
+  if (!repoWrap.contains(e.target)) {
+    repoMenu.classList.add("hidden");
+    repoBtn.setAttribute("aria-expanded", "false");
+  }
+});
+
+scopePill.addEventListener("click", () => {
+  if (anyFilterActive()) clearAllFilters();
+});
+
 searchEl.addEventListener("input", e => {
-  searchQuery = e.target.value.trim();
-  scheduleRender(true);
+  filters.search = e.target.value.trim();
+  renderList();
+  updateScopePill();
 });
 
-collapseBtn.addEventListener("click", () => {
-  document.body.classList.toggle("sidebar-collapsed");
+listEl.addEventListener("click", e => {
+  const row = e.target.closest(".row");
+  if (!row) return;
+  selectAndOpen(row.dataset.id);
 });
-attachRipple(collapseBtn);
 
-showExitedCb.addEventListener("change", e => {
-  showExited = e.target.checked;
-  scheduleRender(true);
+drawerClose.addEventListener("click", closeDrawer);
+drawerExpand.addEventListener("click", toggleDrawerSplit);
+
+helpBtn.addEventListener("click", openHelp);
+helpScrim.addEventListener("click", closeHelp);
+paletteScrim.addEventListener("click", closePalette);
+
+paletteInput.addEventListener("input", e => {
+  paletteQuery = e.target.value;
+  paletteCursor = 0;
+  renderPalette();
+});
+
+emptyClearBtn.addEventListener("click", clearAllFilters);
+
+// Global keyboard
+document.addEventListener("keydown", e => {
+  const inField = e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA";
+
+  // Palette is open
+  if (paletteOpen) {
+    if (e.key === "Escape") { e.preventDefault(); closePalette(); return; }
+    if (e.key === "ArrowDown") { e.preventDefault(); paletteMove(1); return; }
+    if (e.key === "ArrowUp")   { e.preventDefault(); paletteMove(-1); return; }
+    if (e.key === "Enter")     { e.preventDefault(); paletteExecute(); return; }
+    return;
+  }
+
+  // Help is open
+  if (helpOpen) {
+    if (e.key === "Escape") { closeHelp(); return; }
+    return;
+  }
+
+  // Cmd+K / Ctrl+K opens palette from anywhere
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    openPalette();
+    return;
+  }
+
+  if (inField) return;   // remaining shortcuts ignored while typing
+
+  if (e.key === "/") {
+    e.preventDefault();
+    searchEl.focus();
+    return;
+  }
+  if (e.key === "?") {
+    e.preventDefault();
+    openHelp();
+    return;
+  }
+  if (e.key === "Escape") {
+    if (drawerOpen) { closeDrawer(); return; }
+  }
+  if (e.key === "ArrowDown" || e.key === "j") { e.preventDefault(); moveSelection(1); return; }
+  if (e.key === "ArrowUp"   || e.key === "k") { e.preventDefault(); moveSelection(-1); return; }
+  if (e.key === "Enter" && selectedId) { e.preventDefault(); selectAndOpen(selectedId); return; }
+  if (e.key.toLowerCase() === "c" && selectedId) {
+    e.preventDefault();
+    navigator.clipboard.writeText(`claude --resume ${selectedId}`);
+    return;
+  }
 });
 
 // ============================================================
-// SSE
+// SSE — incoming updates
 // ============================================================
+function onUpsert(s) {
+  const existing = sessions.get(s.id);
+  sessions.set(s.id, s);
+  // Decide whether the structural set changed enough to re-render the list
+  if (!existing) {
+    renderList();
+    renderRepoMenu();
+    return;
+  }
+  // Liveness or state change can shift filtering
+  if (existing.live !== s.live || existing.state !== s.state || existing.project !== s.project) {
+    renderList();
+    renderRepoMenu();
+  } else {
+    patchRow(s);
+  }
+  if (selectedId === s.id && drawerOpen) renderDrawer();
+  updateCounts();
+}
+
 function connect() {
   const es = new EventSource("/api/events");
-
-  es.addEventListener("upsert", e => {
-    onUpsert(JSON.parse(e.data));
-  });
-
+  es.addEventListener("upsert", e => onUpsert(JSON.parse(e.data)));
   es.addEventListener("delete", e => {
     const { id } = JSON.parse(e.data);
     sessions.delete(id);
-    if (id === selectedId) {
-      selectedId = null;
-      renderDetail();
-    }
-    scheduleRender(true);
+    if (selectedId === id) { selectedId = null; closeDrawer(); }
+    renderList();
+    renderRepoMenu();
   });
-
   es.addEventListener("snapshot-done", () => {
-    statusEl.textContent = "live";
-    statusEl.classList.add("live");
-    scheduleRender(true);
+    renderList();
+    renderRepoMenu();
+    updateScopePill();
   });
-
   es.onerror = () => {
-    statusEl.textContent = "reconnecting";
-    statusEl.classList.remove("live");
+    // EventSource auto-reconnects; nothing to do
   };
 }
 
-// Refresh "ago" labels every 30s without reordering
+// Refresh age labels every 30s without re-sorting
 setInterval(() => {
-  for (const row of groupsEl.querySelectorAll(".session-item")) {
+  for (const row of listEl.querySelectorAll(".row")) {
     const s = sessions.get(row.dataset.id);
     if (!s) continue;
-    const timeEl = row.querySelector(".session-time");
-    if (timeEl) timeEl.textContent = fmtAgo(s.lastActivity);
+    const ageEl = row.querySelector(".age");
+    if (ageEl) ageEl.textContent = fmtAge(s.lastActivity);
   }
-  if (selectedId) {
-    const metric = detailEl.querySelectorAll(".metric-value");
+  if (selectedId && drawerOpen) {
+    const vals = drawerBody.querySelectorAll(".metric-value");
     const s = sessions.get(selectedId);
-    if (s && metric.length >= 2) {
-      metric[0].textContent = fmtAgo(s.lastActivity);
-      metric[1].textContent = fmtAgo(s.startedAt);
+    if (s && vals.length >= 2) {
+      vals[0].textContent = fmtAge(s.lastActivity);
+      vals[1].textContent = fmtAge(s.startedAt);
     }
   }
 }, 30000);
 
-loadCollapsedState();
+// ============================================================
+// Boot
+// ============================================================
+restore();
+renderChips();
+renderList();
+updateScopePill();
 connect();
